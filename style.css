@@ -163,6 +163,31 @@ input[type="text"]:focus, textarea:focus { outline: none; border-color: var(--pr
 }
 .quota-note { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
 
+/* ---------- Soll/Ist-Anteilsbalken ---------- */
+.share-track {
+  height: 10px; border-radius: 6px; background: var(--border); overflow: hidden;
+  position: relative; margin-top: 8px;
+}
+.share-fill {
+  height: 100%; border-radius: 6px;
+  background: linear-gradient(90deg, #a29bfe, var(--primary));
+  transition: width .6s cubic-bezier(.3,.9,.3,1);
+  width: 0%;
+}
+.share-target-marker {
+  position: absolute; top: -3px; bottom: -3px; width: 3px; border-radius: 2px;
+  background: var(--text); box-shadow: 0 0 0 1.5px #fff;
+}
+.share-label { font-size: 11px; color: var(--text-muted); margin-top: 4px; display: flex; justify-content: space-between; }
+
+/* ---------- Quota-Summen-Box (Einstellungen) ---------- */
+.quota-sum-box {
+  font-size: 13px; font-weight: 700; padding: 9px 12px; border-radius: 10px;
+  margin-bottom: 12px; text-align: center; transition: all .2s;
+}
+.quota-sum-box.valid { background: #e8f9ee; color: var(--ok); }
+.quota-sum-box.invalid { background: #fdecef; color: var(--danger); }
+
 /* ---------- Filter chips ---------- */
 .filter-row { display: flex; gap: 8px; overflow-x: auto; margin-bottom: 14px; padding-bottom: 2px; }
 .chip {
@@ -288,3 +313,50 @@ input[type="text"]:focus, textarea:focus { outline: none; border-color: var(--pr
   max-width: 90%; text-align: center;
 }
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+/* ---------- Haptik: Druckgefühl für alle interaktiven Elemente ---------- */
+button, .chip, .assignee-chip, .task-card, .profile-pill, .nav-btn, .member-row {
+  -webkit-tap-highlight-color: transparent;
+}
+.chip:active, .assignee-chip:active, .nav-btn:active, .remove-member-btn:active,
+.icon-btn:active, .fab-inline:active {
+  transform: scale(0.93);
+}
+.chip, .assignee-chip, .nav-btn, .remove-member-btn, .icon-btn, .fab-inline {
+  transition: transform .08s ease;
+}
+
+/* ---------- Erfolgs-Feier bei "Aufgabe erledigt" ---------- */
+.celebration-overlay {
+  position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
+  z-index: 100; pointer-events: none;
+}
+.celebration-overlay.show { display: flex; animation: celebrationBg 1.4s ease forwards; }
+.celebration-content { text-align: center; }
+.celebration-emoji {
+  font-size: 90px; display: inline-block;
+  animation: celebrationPop 1.4s cubic-bezier(.34,1.56,.64,1) forwards;
+  filter: drop-shadow(0 8px 16px rgba(0,0,0,0.25));
+}
+.celebration-text {
+  font-size: 22px; font-weight: 800; color: var(--primary-dark); margin-top: 10px;
+  opacity: 0; animation: celebrationTextFade 1.4s ease forwards;
+}
+@keyframes celebrationPop {
+  0% { transform: translateY(60px) scale(0.3) rotate(-15deg); opacity: 0; }
+  35% { transform: translateY(-24px) scale(1.3) rotate(10deg); opacity: 1; }
+  55% { transform: translateY(0) scale(1) rotate(-5deg); }
+  75% { transform: translateY(-10px) scale(1.08) rotate(3deg); }
+  100% { transform: translateY(0) scale(1) rotate(0deg); opacity: 0; }
+}
+@keyframes celebrationTextFade {
+  0% { opacity: 0; transform: translateY(12px); }
+  20% { opacity: 1; transform: translateY(0); }
+  78% { opacity: 1; }
+  100% { opacity: 0; }
+}
+@keyframes celebrationBg {
+  0% { background: rgba(108,92,231,0); }
+  18% { background: rgba(108,92,231,0.14); }
+  100% { background: rgba(108,92,231,0); }
+}
