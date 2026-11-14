@@ -17,6 +17,7 @@ let state = {
   me: null,
   homeFilter: "all",
 };
+let quotaInteracting = false; // true solange ein Soll-Anteil-Regler aktiv bedient wird
 
 // ---------------- INIT ----------------
 
@@ -566,6 +567,10 @@ function renderQuotaSumBox() {
 }
 
 function renderSettingsMembers() {
+  // Während jemand gerade einen Regler bewegt, nicht neu aufbauen -
+  // sonst reißt ein zeitgleiches Live-Sync-Update die Bedienung ab.
+  if (quotaInteracting) return;
+
   renderQuotaSumBox();
   const list = document.getElementById("memberSettingsList");
   list.innerHTML = "";
@@ -585,12 +590,19 @@ function renderSettingsMembers() {
   });
 
   list.querySelectorAll('input[type="range"]').forEach((slider) => {
+    slider.addEventListener("pointerdown", () => {
+      quotaInteracting = true;
+    });
+    slider.addEventListener("blur", () => {
+      quotaInteracting = false;
+    });
     slider.oninput = (e) => {
       e.target.closest(".member-settings-row").querySelector(".quota-value").textContent =
         Math.round(parseFloat(e.target.value)) + "%";
     };
     slider.onchange = async (e) => {
       const newVal = Math.round(parseFloat(e.target.value) * 10) / 10;
+      quotaInteracting = false;
       await sb.from("members").update({ quota_percent: newVal }).eq("id", e.target.dataset.id);
       await loadData();
       renderAll();
