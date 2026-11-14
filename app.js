@@ -569,7 +569,10 @@ function renderQuotaSumBox() {
 function renderSettingsMembers() {
   // Während jemand gerade einen Regler bewegt, nicht neu aufbauen -
   // sonst reißt ein zeitgleiches Live-Sync-Update die Bedienung ab.
-  if (quotaInteracting) return;
+  // Zwei unabhängige Prüfungen, falls ein Event-Typ im Browser mal nicht feuert.
+  const focusedInSlider =
+    document.activeElement && document.activeElement.closest(".quota-slider-wrap");
+  if (quotaInteracting || focusedInSlider) return;
 
   renderQuotaSumBox();
   const list = document.getElementById("memberSettingsList");
@@ -590,9 +593,15 @@ function renderSettingsMembers() {
   });
 
   list.querySelectorAll('input[type="range"]').forEach((slider) => {
-    slider.addEventListener("pointerdown", () => {
+    const markActive = () => {
       quotaInteracting = true;
-    });
+    };
+    // Mehrere Event-Typen, da je nach Browser/Eingabeart (Maus, Touch,
+    // Safari-Responsive-Modus) nicht immer dieselben Events zuverlässig feuern.
+    slider.addEventListener("pointerdown", markActive);
+    slider.addEventListener("mousedown", markActive);
+    slider.addEventListener("touchstart", markActive, { passive: true });
+    slider.addEventListener("focus", markActive);
     slider.addEventListener("blur", () => {
       quotaInteracting = false;
     });
@@ -603,6 +612,7 @@ function renderSettingsMembers() {
     slider.onchange = async (e) => {
       const newVal = Math.round(parseFloat(e.target.value) * 10) / 10;
       quotaInteracting = false;
+      e.target.blur(); // Fokus abgeben, damit der anstehende Re-Render nicht blockiert wird
       await sb.from("members").update({ quota_percent: newVal }).eq("id", e.target.dataset.id);
       await loadData();
       renderAll();
