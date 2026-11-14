@@ -219,7 +219,8 @@ function renderLeaderboard() {
     const row = document.createElement("div");
     row.className = "member-row" + (m.points === minPoints ? " low-rank" : "");
     const pct = Math.round((m.points / maxPoints) * 100);
-    const actualShare = totalPoints > 0 ? Math.round((m.points / totalPoints) * 100) : 0;
+    const actualShare = totalPoints > 0 ? (m.points / totalPoints) * 100 : 0;
+    const targetPct = Number(m.quota_percent);
 
     row.innerHTML = `
       <div class="member-row-top">
@@ -227,13 +228,20 @@ function renderLeaderboard() {
         <div class="member-points"><b>${m.points}</b> Punkte</div>
       </div>
       <div class="bar-track"><div class="bar-fill" style="width:0%" data-target="${pct}"></div></div>
-      <div class="quota-note">Soll-Anteil: ${m.quota_percent}% · Aktueller Anteil erledigter Punkte: ${actualShare}%</div>
+      <div class="share-track">
+        <div class="share-fill" style="width:0%" data-target="${actualShare}"></div>
+        <div class="share-target-marker" style="left:${Math.min(99, targetPct)}%"></div>
+      </div>
+      <div class="share-label"><span>Ist-Anteil: ${Math.round(actualShare)}%</span><span>Soll: ${targetPct.toFixed(1)}%</span></div>
     `;
     el.appendChild(row);
   });
 
   requestAnimationFrame(() => {
     el.querySelectorAll(".bar-fill").forEach((bar) => {
+      bar.style.width = bar.dataset.target + "%";
+    });
+    el.querySelectorAll(".share-fill").forEach((bar) => {
       bar.style.width = bar.dataset.target + "%";
     });
   });
@@ -268,10 +276,11 @@ function taskUrgency(task) {
   return { remainingMs, remainingDays, fractionRemaining, cycleMs };
 }
 
-function urgencyColor(fraction, overdue) {
+function urgencyColor(remainingDays, overdue) {
   if (overdue) return "var(--danger)";
-  if (fraction < 0.2) return "var(--danger)";
-  if (fraction < 0.5) return "var(--warn)";
+  const d = Math.round(remainingDays);
+  if (d <= 1) return "var(--danger)"; // heute fällig oder noch 1 Tag
+  if (d <= 2) return "var(--warn)"; // noch 2 Tage
   return "var(--ok)";
 }
 
@@ -301,8 +310,8 @@ function buildTaskCard(task) {
       <div class="task-points">${task.points} P.</div>
     </div>
     <div class="task-assignees">👥 ${escapeHtml(assignedNames)}</div>
-    <div class="urgency-track"><div class="urgency-fill" style="width:${overdue ? 100 : widthPct}%; background:${urgencyColor(u.fractionRemaining, overdue)}"></div></div>
-    <div class="urgency-label" style="color:${urgencyColor(u.fractionRemaining, overdue)}">${urgencyLabel(u)}</div>
+    <div class="urgency-track"><div class="urgency-fill" style="width:${overdue ? 100 : widthPct}%; background:${urgencyColor(u.remainingDays, overdue)}"></div></div>
+    <div class="urgency-label" style="color:${urgencyColor(u.remainingDays, overdue)}">${urgencyLabel(u)}</div>
   `;
   card.onclick = () => openDetailModal(task);
   return card;
@@ -471,7 +480,7 @@ function openDetailModal(task) {
   const overdue = u.remainingMs < 0;
   const statusEl = document.getElementById("detailStatus");
   statusEl.textContent = urgencyLabel(u);
-  statusEl.style.color = urgencyColor(u.fractionRemaining, overdue);
+  statusEl.style.color = urgencyColor(u.remainingDays, overdue);
 
   const assignedNames = task.assigned_member_ids && task.assigned_member_ids.length
     ? task.assigned_member_ids.map((id) => memberName(id)).join(", ")
@@ -529,22 +538,45 @@ document.getElementById("btnCompleteTask").onclick = async () => {
   await loadData();
   if (state.me) state.me = state.members.find((m) => m.id === state.me.id) || state.me;
   renderAll();
+  playCelebration();
   showToast(`✓ Erledigt! +${task.points} Punkte für ${memberName(detailDoneBy)}`);
 };
 
 // ---------------- SETTINGS ----------------
 
+function quotaSum() {
+  return state.members.reduce((s, m) => s + Number(m.quota_percent), 0);
+}
+
+function renderQuotaSumBox() {
+  const box = document.getElementById("quotaSumBox");
+  if (!box) return;
+  if (state.members.length === 0) {
+    box.textContent = "Noch keine Mitglieder";
+    box.className = "quota-sum-box invalid";
+    return;
+  }
+  const sum = Math.round(quotaSum() * 10) / 10;
+  const valid = sum >= 98 && sum <= 100;
+  box.textContent = valid
+    ? `Summe der Soll-Anteile: ${sum}% ✓`
+    : `Summe der Soll-Anteile: ${sum}% (muss zwischen 98% und 100% liegen)`;
+  box.className = "quota-sum-box " + (valid ? "valid" : "invalid");
+}
+
 function renderSettingsMembers() {
+  renderQuotaSumBox();
   const list = document.getElementById("memberSettingsList");
   list.innerHTML = "";
   state.members.forEach((m) => {
     const row = document.createElement("div");
     row.className = "member-settings-row";
+    const displayVal = Number(m.quota_percent).toFixed(1);
     row.innerHTML = `
       <div class="member-settings-name">${escapeHtml(m.name)}</div>
       <div class="quota-slider-wrap">
-        <input type="range" min="0" max="100" step="5" value="${m.quota_percent}" class="slider" data-id="${m.id}">
-        <span class="quota-value">${m.quota_percent}%</span>
+        <input type="range" min="0" max="100" step="0.1" value="${m.quota_percent}" class="slider" data-id="${m.id}">
+        <span class="quota-value">${displayVal}%</span>
       </div>
       <button class="remove-member-btn" data-id="${m.id}">✕</button>
     `;
@@ -552,11 +584,21 @@ function renderSettingsMembers() {
   });
 
   list.querySelectorAll('input[type="range"]').forEach((slider) => {
+    const member = state.members.find((m) => m.id === slider.dataset.id);
     slider.oninput = (e) => {
-      e.target.closest(".member-settings-row").querySelector(".quota-value").textContent = e.target.value + "%";
+      e.target.closest(".member-settings-row").querySelector(".quota-value").textContent =
+        parseFloat(e.target.value).toFixed(1) + "%";
     };
     slider.onchange = async (e) => {
-      await sb.from("members").update({ quota_percent: parseInt(e.target.value, 10) }).eq("id", e.target.dataset.id);
+      const newVal = Math.round(parseFloat(e.target.value) * 10) / 10;
+      const oldVal = Number(member.quota_percent);
+      const hypotheticalSum = Math.round((quotaSum() - oldVal + newVal) * 10) / 10;
+      if (hypotheticalSum < 98 || hypotheticalSum > 100) {
+        showToast(`Nicht gespeichert: Summe wäre ${hypotheticalSum}% (erlaubt: 98–100%)`);
+        renderSettingsMembers();
+        return;
+      }
+      await sb.from("members").update({ quota_percent: newVal }).eq("id", e.target.dataset.id);
       await loadData();
       renderAll();
     };
@@ -571,6 +613,42 @@ function renderSettingsMembers() {
     };
   });
 }
+
+async function evenlySplitQuotas() {
+  const n = state.members.length;
+  if (n === 0) return;
+  const base = Math.floor(1000 / n) / 10; // eine Nachkommastelle, abgerundet
+  const values = new Array(n).fill(base);
+  let remainder = Math.round((100 - base * n) * 10) / 10;
+  let i = 0;
+  while (remainder > 0.05) {
+    values[i % n] = Math.round((values[i % n] + 0.1) * 10) / 10;
+    remainder = Math.round((remainder - 0.1) * 10) / 10;
+    i++;
+  }
+  const updates = state.members.map((m, idx) =>
+    sb.from("members").update({ quota_percent: values[idx] }).eq("id", m.id)
+  );
+  await Promise.all(updates);
+  await loadData();
+  renderAll();
+  showToast("Gleichmäßig verteilt ✓");
+}
+
+document.getElementById("btnEvenSplit").onclick = evenlySplitQuotas;
+
+document.getElementById("btnLeaveWg").onclick = () => {
+  if (!confirm("WG wirklich verlassen? Du kannst jederzeit mit dem Beitrittscode wieder beitreten.")) return;
+  if (sb && sb.removeAllChannels) sb.removeAllChannels();
+  localStorage.removeItem(LS.wgId);
+  localStorage.removeItem(LS.wgCode);
+  localStorage.removeItem(LS.wgName);
+  localStorage.removeItem(LS.memberId);
+  state = { wg: null, members: [], tasks: [], me: null, homeFilter: "all" };
+  document.getElementById("newWgName").value = "";
+  document.getElementById("joinCode").value = "";
+  showScreen("onboarding");
+};
 
 document.getElementById("btnSettingsAddMember").onclick = async () => {
   const input = document.getElementById("settingsNewMemberName");
@@ -595,6 +673,58 @@ document.getElementById("btnResetPoints").onclick = async () => {
 document.getElementById("btnCreateWg").onclick = createWg;
 document.getElementById("btnJoinWg").onclick = joinWg;
 document.getElementById("btnAddMemberOnboard").onclick = addMemberOnboard;
+
+// ---------------- HAPTIK & FEIER ----------------
+
+function haptic(pattern = 10) {
+  if (navigator.vibrate) {
+    try {
+      navigator.vibrate(pattern);
+    } catch (e) {
+      /* ignore */
+    }
+  }
+}
+
+document.addEventListener("pointerdown", (e) => {
+  if (e.target.closest("button, .chip, .assignee-chip, .task-card, .profile-pill, .nav-btn")) {
+    haptic(10);
+  }
+});
+
+function playFanfare() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const notes = [523.25, 659.25, 783.99, 1046.5]; // C5 E5 G5 C6
+    notes.forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "triangle";
+      osc.frequency.value = freq;
+      const startTime = ctx.currentTime + i * 0.1;
+      gain.gain.setValueAtTime(0, startTime);
+      gain.gain.linearRampToValueAtTime(0.2, startTime + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.001, startTime + 0.3);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(startTime);
+      osc.stop(startTime + 0.35);
+    });
+    setTimeout(() => ctx.close(), 900);
+  } catch (e) {
+    /* Web Audio nicht verfügbar - ignorieren */
+  }
+}
+
+function playCelebration() {
+  const overlay = document.getElementById("celebrationOverlay");
+  overlay.classList.remove("show");
+  void overlay.offsetWidth; // Animation neu starten
+  overlay.classList.add("show");
+  haptic([15, 40, 15, 40, 60]);
+  playFanfare();
+  clearTimeout(overlay._timer);
+  overlay._timer = setTimeout(() => overlay.classList.remove("show"), 1400);
+}
 
 // ---------------- UTIL ----------------
 
