@@ -14,6 +14,7 @@ let state = {
   wg: null,
   members: [],
   tasks: [],
+  completions: [],
   me: null,
   homeFilter: "all",
 };
@@ -87,6 +88,20 @@ async function loadData() {
   ]);
   state.members = membersRes.data || [];
   state.tasks = tasksRes.data || [];
+
+  // Verlauf (completions) hat keine eigene wg_id-Spalte, daher über die
+  // Aufgaben-IDs dieser WG filtern.
+  const taskIds = state.tasks.map((t) => t.id);
+  if (taskIds.length > 0) {
+    const { data: completionsData } = await sb
+      .from("completions")
+      .select("*")
+      .in("task_id", taskIds)
+      .order("completed_at", { ascending: false });
+    state.completions = completionsData || [];
+  } else {
+    state.completions = [];
+  }
 }
 
 function subscribeRealtime() {
@@ -197,6 +212,7 @@ function renderAll() {
   renderFilterRow();
   renderHomeTaskList();
   renderTasksView();
+  renderHistory();
   renderSettingsMembers();
   document.getElementById("wgCodeBox").textContent = state.wg.code;
   document.getElementById("wgNameLabel").textContent = state.wg.name;
@@ -352,7 +368,45 @@ function renderTasksView() {
 
 function memberName(id) {
   const m = state.members.find((x) => x.id === id);
-  return m ? m.name : "?";
+  return m ? m.name : "Ehemaliges Mitglied";
+}
+
+function taskTitleById(id) {
+  const t = state.tasks.find((x) => x.id === id);
+  return t ? t.title : "(gelöschte Aufgabe)";
+}
+
+function formatDateTime(iso) {
+  const d = new Date(iso);
+  return d.toLocaleString("de-DE", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function renderHistory() {
+  const el = document.getElementById("historyList");
+  if (!el) return;
+  el.innerHTML = "";
+  if (state.completions.length === 0) {
+    el.innerHTML = '<p class="empty-state">Noch keine erledigten Aufgaben.</p>';
+    return;
+  }
+  state.completions.forEach((c) => {
+    const item = document.createElement("div");
+    item.className = "history-item";
+    item.innerHTML = `
+      <div class="history-top">
+        <span class="history-task">${escapeHtml(taskTitleById(c.task_id))}</span>
+        <span class="history-points">+${c.points} P.</span>
+      </div>
+      <div class="history-meta">${escapeHtml(memberName(c.member_id))} · ${formatDateTime(c.completed_at)}</div>
+    `;
+    el.appendChild(item);
+  });
 }
 
 // ---------------- NAV ----------------
