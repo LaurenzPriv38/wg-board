@@ -558,8 +558,11 @@ function renderQuotaSumBox() {
     return;
   }
   const sum = Math.round(quotaSum() * 10) / 10;
-  const valid = sum >= 98 && sum <= 100;
   const sumDisplay = Math.round(sum);
+  // Gültigkeit anhand der gerundeten, angezeigten Zahl prüfen (nicht der
+  // exakten Nachkommazahl) - sonst kann die Box z.B. "100%" anzeigen und
+  // trotzdem rot sein, weil im Hintergrund 100,1 o.ä. steckt.
+  const valid = sumDisplay >= 98 && sumDisplay <= 100;
   box.textContent = valid
     ? `Summe der Soll-Anteile: ${sumDisplay}% ✓`
     : `Summe der Soll-Anteile: ${sumDisplay}% (muss zwischen 98% und 100% liegen)`;
@@ -613,7 +616,16 @@ function renderSettingsMembers() {
       const newVal = Math.round(parseFloat(e.target.value) * 10) / 10;
       quotaInteracting = false;
       e.target.blur(); // Fokus abgeben, damit der anstehende Re-Render nicht blockiert wird
-      await sb.from("members").update({ quota_percent: newVal }).eq("id", e.target.dataset.id);
+      const { error } = await sb
+        .from("members")
+        .update({ quota_percent: newVal })
+        .eq("id", e.target.dataset.id);
+      if (error) {
+        // Speichern ist fehlgeschlagen (z.B. weil die Datenbank-Spalte noch
+        // keine Nachkommastellen zulässt) - Nutzer informieren statt stillschweigend
+        // auf den alten Wert zurückzuspringen.
+        showToast("⚠️ Speichern fehlgeschlagen: " + error.message);
+      }
       await loadData();
       renderAll();
     };
@@ -644,10 +656,15 @@ async function evenlySplitQuotas() {
   const updates = state.members.map((m, idx) =>
     sb.from("members").update({ quota_percent: values[idx] }).eq("id", m.id)
   );
-  await Promise.all(updates);
+  const results = await Promise.all(updates);
+  const failed = results.find((r) => r.error);
+  if (failed) {
+    showToast("⚠️ Speichern fehlgeschlagen: " + failed.error.message);
+  } else {
+    showToast("Gleichmäßig verteilt ✓");
+  }
   await loadData();
   renderAll();
-  showToast("Gleichmäßig verteilt ✓");
 }
 
 document.getElementById("btnEvenSplit").onclick = evenlySplitQuotas;
