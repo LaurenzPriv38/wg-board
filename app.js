@@ -587,7 +587,7 @@ function renderSettingsMembers() {
     row.innerHTML = `
       <div class="member-settings-name">${escapeHtml(m.name)}</div>
       <div class="quota-slider-wrap">
-        <input type="range" min="0" max="100" step="0.1" value="${m.quota_percent}" class="slider" data-id="${m.id}">
+        <input type="range" min="0" max="100" step="1" value="${displayVal}" class="slider" data-id="${m.id}">
         <span class="quota-value">${displayVal}%</span>
       </div>
       <button class="remove-member-btn" data-id="${m.id}">✕</button>
@@ -610,10 +610,15 @@ function renderSettingsMembers() {
     });
     slider.oninput = (e) => {
       e.target.closest(".member-settings-row").querySelector(".quota-value").textContent =
-        Math.round(parseFloat(e.target.value)) + "%";
+        e.target.value + "%";
     };
     slider.onchange = async (e) => {
-      const newVal = Math.round(parseFloat(e.target.value) * 10) / 10;
+      // Beim manuellen Ziehen immer ganze Prozent speichern, damit Anzeige
+      // und gespeicherter Wert exakt übereinstimmen (keine Nachkomma-Drift,
+      // die die Summenanzeige auf z.B. 101% springen lässt). Nachkommastellen
+      // gibt es nur, wenn "Gleichmäßig verteilen" das für eine ungerade
+      // Mitgliederzahl braucht.
+      const newVal = Math.round(parseFloat(e.target.value));
       quotaInteracting = false;
       e.target.blur(); // Fokus abgeben, damit der anstehende Re-Render nicht blockiert wird
       const { error } = await sb
