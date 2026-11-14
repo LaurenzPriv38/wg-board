@@ -232,7 +232,7 @@ function renderLeaderboard() {
         <div class="share-fill" style="width:0%" data-target="${actualShare}"></div>
         <div class="share-target-marker" style="left:${Math.min(99, targetPct)}%"></div>
       </div>
-      <div class="share-label"><span>Ist-Anteil: ${Math.round(actualShare)}%</span><span>Soll: ${targetPct.toFixed(1)}%</span></div>
+      <div class="share-label"><span>Ist-Anteil: ${Math.round(actualShare)}%</span><span>Soll: ${Math.round(targetPct)}%</span></div>
     `;
     el.appendChild(row);
   });
@@ -558,9 +558,10 @@ function renderQuotaSumBox() {
   }
   const sum = Math.round(quotaSum() * 10) / 10;
   const valid = sum >= 98 && sum <= 100;
+  const sumDisplay = Math.round(sum);
   box.textContent = valid
-    ? `Summe der Soll-Anteile: ${sum}% ✓`
-    : `Summe der Soll-Anteile: ${sum}% (muss zwischen 98% und 100% liegen)`;
+    ? `Summe der Soll-Anteile: ${sumDisplay}% ✓`
+    : `Summe der Soll-Anteile: ${sumDisplay}% (muss zwischen 98% und 100% liegen)`;
   box.className = "quota-sum-box " + (valid ? "valid" : "invalid");
 }
 
@@ -571,7 +572,7 @@ function renderSettingsMembers() {
   state.members.forEach((m) => {
     const row = document.createElement("div");
     row.className = "member-settings-row";
-    const displayVal = Number(m.quota_percent).toFixed(1);
+    const displayVal = Math.round(Number(m.quota_percent));
     row.innerHTML = `
       <div class="member-settings-name">${escapeHtml(m.name)}</div>
       <div class="quota-slider-wrap">
@@ -587,14 +588,14 @@ function renderSettingsMembers() {
     const member = state.members.find((m) => m.id === slider.dataset.id);
     slider.oninput = (e) => {
       e.target.closest(".member-settings-row").querySelector(".quota-value").textContent =
-        parseFloat(e.target.value).toFixed(1) + "%";
+        Math.round(parseFloat(e.target.value)) + "%";
     };
     slider.onchange = async (e) => {
       const newVal = Math.round(parseFloat(e.target.value) * 10) / 10;
       const oldVal = Number(member.quota_percent);
       const hypotheticalSum = Math.round((quotaSum() - oldVal + newVal) * 10) / 10;
       if (hypotheticalSum < 98 || hypotheticalSum > 100) {
-        showToast(`Nicht gespeichert: Summe wäre ${hypotheticalSum}% (erlaubt: 98–100%)`);
+        showToast(`Nicht gespeichert: Summe wäre ${Math.round(hypotheticalSum)}% (erlaubt: 98–100%)`);
         renderSettingsMembers();
         return;
       }
