@@ -89,12 +89,14 @@
 
     <section class="settings-section">
       <h3>WG-Mitglieder</h3>
+      <div id="quotaSumBox" class="quota-sum-box">Summe: 100%</div>
       <div id="memberSettingsList" class="member-settings-list"></div>
       <div class="add-member-row">
         <input id="settingsNewMemberName" type="text" placeholder="Neues Mitglied…" maxlength="24">
         <button id="btnSettingsAddMember" class="btn-primary small">Hinzufügen</button>
       </div>
-      <p class="hint">Der Prozentwert gibt an, wie viel vom WG-Haushalt eine Person übernehmen soll (muss nicht 100% ergeben). Wird im Punktestand als Soll-Vergleich angezeigt.</p>
+      <button id="btnEvenSplit" class="btn-secondary small" style="margin-top:10px;">Gleichmäßig verteilen</button>
+      <p class="hint">Der Soll-Anteil gibt an, wie viel vom WG-Haushalt eine Person übernehmen soll. Die Summe aller Anteile muss zwischen 98% und 100% liegen, sonst wird eine Änderung nicht gespeichert.</p>
     </section>
 
     <section class="settings-section">
@@ -106,6 +108,12 @@
     <section class="settings-section">
       <h3>Punkte zurücksetzen</h3>
       <button id="btnResetPoints" class="btn-danger">Alle Punktestände auf 0 setzen</button>
+    </section>
+
+    <section class="settings-section">
+      <h3>WG verlassen</h3>
+      <button id="btnLeaveWg" class="btn-secondary">WG verlassen</button>
+      <p class="hint">Du kommst zurück zum Start und kannst jederzeit mit dem Beitrittscode wieder einsteigen. Mitglieder entfernen geht oben bei „WG-Mitglieder" über das ✕.</p>
     </section>
   </main>
 
@@ -167,6 +175,13 @@
 </div>
 
 <div id="toast" class="toast"></div>
+
+<div id="celebrationOverlay" class="celebration-overlay">
+  <div class="celebration-content">
+    <div class="celebration-emoji">💪</div>
+    <div class="celebration-text">Erledigt!</div>
+  </div>
+</div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <script src="config.js"></script>
