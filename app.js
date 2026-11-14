@@ -585,20 +585,12 @@ function renderSettingsMembers() {
   });
 
   list.querySelectorAll('input[type="range"]').forEach((slider) => {
-    const member = state.members.find((m) => m.id === slider.dataset.id);
     slider.oninput = (e) => {
       e.target.closest(".member-settings-row").querySelector(".quota-value").textContent =
         Math.round(parseFloat(e.target.value)) + "%";
     };
     slider.onchange = async (e) => {
       const newVal = Math.round(parseFloat(e.target.value) * 10) / 10;
-      const oldVal = Number(member.quota_percent);
-      const hypotheticalSum = Math.round((quotaSum() - oldVal + newVal) * 10) / 10;
-      if (hypotheticalSum < 98 || hypotheticalSum > 100) {
-        showToast(`Nicht gespeichert: Summe wäre ${Math.round(hypotheticalSum)}% (erlaubt: 98–100%)`);
-        renderSettingsMembers();
-        return;
-      }
       await sb.from("members").update({ quota_percent: newVal }).eq("id", e.target.dataset.id);
       await loadData();
       renderAll();
