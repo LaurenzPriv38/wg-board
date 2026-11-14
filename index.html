@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+<meta name="theme-color" content="#6c5ce7">
+<title>WG Board</title>
+<link rel="manifest" href="manifest.json">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ============ ONBOARDING ============ -->
+<div id="onboarding" class="screen">
+  <div class="onboard-wrap">
+    <div class="logo">🏠</div>
+    <h1>WG Board</h1>
+    <p class="sub">Aufgaben planen. Fair verteilen. WG-Leben strukturieren.</p>
+
+    <div class="onboard-card">
+      <h2>Neue WG erstellen</h2>
+      <input id="newWgName" type="text" placeholder="Name der WG (z. B. „Sonnenallee 12“)" maxlength="40">
+      <button id="btnCreateWg" class="btn-primary">WG erstellen</button>
+    </div>
+
+    <div class="divider"><span>oder</span></div>
+
+    <div class="onboard-card">
+      <h2>WG beitreten</h2>
+      <input id="joinCode" type="text" placeholder="Beitrittscode (z. B. AB12CD)" maxlength="8" autocapitalize="characters">
+      <button id="btnJoinWg" class="btn-secondary">Beitreten</button>
+    </div>
+    <p id="onboardError" class="error-text"></p>
+  </div>
+</div>
+
+<!-- ============ PICK PROFILE (wer bist du?) ============ -->
+<div id="pickProfile" class="screen">
+  <div class="onboard-wrap">
+    <div class="logo">👋</div>
+    <h1>Wer bist du?</h1>
+    <p class="sub">Wähle dein Profil, oder lege eins an.</p>
+    <div id="profileList" class="profile-list"></div>
+
+    <div class="onboard-card">
+      <h2>Neues Mitglied anlegen</h2>
+      <input id="newMemberName" type="text" placeholder="Dein Name" maxlength="24">
+      <button id="btnAddMemberOnboard" class="btn-secondary">Hinzufügen & auswählen</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ APP SHELL ============ -->
+<div id="app" class="screen app-shell">
+
+  <header class="topbar">
+    <div class="topbar-title">
+      <span id="wgNameLabel">WG</span>
+      <span class="topbar-sub" id="meLabel"></span>
+    </div>
+    <button id="btnSwitchProfile" class="icon-btn" title="Profil wechseln">🔄</button>
+  </header>
+
+  <!-- HOME VIEW -->
+  <main id="view-home" class="view active">
+    <section class="leaderboard" id="leaderboard"></section>
+
+    <div class="filter-row" id="filterRow">
+      <button class="chip active" data-filter="all">Alle</button>
+    </div>
+
+    <section class="task-list" id="taskList"></section>
+  </main>
+
+  <!-- TASKS / AKTIVITÄTEN VIEW -->
+  <main id="view-tasks" class="view">
+    <div class="view-header">
+      <h2>Aktivitäten</h2>
+      <button id="btnAddTask" class="fab-inline">＋ Neue Aufgabe</button>
+    </div>
+    <section class="task-list" id="allTaskList"></section>
+  </main>
+
+  <!-- SETTINGS VIEW -->
+  <main id="view-settings" class="view">
+    <div class="view-header">
+      <h2>Einstellungen</h2>
+    </div>
+
+    <section class="settings-section">
+      <h3>WG-Mitglieder</h3>
+      <div id="memberSettingsList" class="member-settings-list"></div>
+      <div class="add-member-row">
+        <input id="settingsNewMemberName" type="text" placeholder="Neues Mitglied…" maxlength="24">
+        <button id="btnSettingsAddMember" class="btn-primary small">Hinzufügen</button>
+      </div>
+      <p class="hint">Der Prozentwert gibt an, wie viel vom WG-Haushalt eine Person übernehmen soll (muss nicht 100% ergeben). Wird im Punktestand als Soll-Vergleich angezeigt.</p>
+    </section>
+
+    <section class="settings-section">
+      <h3>WG-Beitrittscode</h3>
+      <div class="code-box" id="wgCodeBox">------</div>
+      <p class="hint">Teile diesen Code mit deinen Mitbewohnern, damit sie beitreten können.</p>
+    </section>
+
+    <section class="settings-section">
+      <h3>Punkte zurücksetzen</h3>
+      <button id="btnResetPoints" class="btn-danger">Alle Punktestände auf 0 setzen</button>
+    </section>
+  </main>
+
+  <nav class="bottom-nav">
+    <button class="nav-btn active" data-view="home"><span class="nav-icon">🏆</span><span>Home</span></button>
+    <button class="nav-btn" data-view="tasks"><span class="nav-icon">📋</span><span>Aktivitäten</span></button>
+    <button class="nav-btn" data-view="settings"><span class="nav-icon">⚙️</span><span>Einstellungen</span></button>
+  </nav>
+</div>
+
+<!-- ============ TASK EDITOR MODAL ============ -->
+<div id="taskModal" class="modal-overlay">
+  <div class="modal-sheet">
+    <div class="modal-handle"></div>
+    <h2 id="taskModalTitle">Neue Aufgabe</h2>
+
+    <label class="field-label">Titel</label>
+    <input id="taskTitle" type="text" placeholder="z. B. Bad putzen" maxlength="40">
+
+    <label class="field-label">Details (optional)</label>
+    <textarea id="taskDetails" rows="2" placeholder="Was genau ist zu tun?" maxlength="200"></textarea>
+
+    <label class="field-label">Wiederholt sich alle: <span id="cycleDaysLabel" class="label-value">7 Tage</span></label>
+    <input id="cycleDaysSlider" type="range" min="1" max="60" value="7" class="slider">
+
+    <label class="field-label">Punktewert: <span id="pointsLabel" class="label-value">20</span></label>
+    <input id="pointsSlider" type="range" min="5" max="100" step="5" value="20" class="slider slider-points">
+
+    <label class="field-label">Zuständig</label>
+    <div id="assigneeChips" class="assignee-chips"></div>
+    <p class="hint">Niemand ausgewählt = Aufgabe gilt für alle.</p>
+
+    <div class="modal-actions">
+      <button id="btnDeleteTask" class="btn-danger small hidden">Löschen</button>
+      <button id="btnCancelTask" class="btn-text">Abbrechen</button>
+      <button id="btnSaveTask" class="btn-primary">Speichern</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ TASK DETAIL MODAL ============ -->
+<div id="detailModal" class="modal-overlay">
+  <div class="modal-sheet">
+    <div class="modal-handle"></div>
+    <h2 id="detailTitle">Aufgabe</h2>
+    <p id="detailStatus" class="detail-status"></p>
+    <p id="detailDetails" class="detail-details"></p>
+    <p class="detail-meta" id="detailMeta"></p>
+
+    <label class="field-label">Erledigt von</label>
+    <div id="detailDoneBySelect" class="assignee-chips"></div>
+
+    <div class="modal-actions">
+      <button id="btnEditTask" class="btn-text">Bearbeiten</button>
+      <button id="btnCloseDetail" class="btn-text">Abbrechen</button>
+      <button id="btnCompleteTask" class="btn-primary">✓ Aufgabe erledigt</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script src="config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

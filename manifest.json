@@ -1,0 +1,9 @@
+{
+  "name": "WG Board",
+  "short_name": "WG Board",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#f6f5f9",
+  "theme_color": "#6c5ce7",
+  "icons": []
+}
