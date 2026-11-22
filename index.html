@@ -65,6 +65,8 @@
   <main id="view-home" class="view active">
     <section class="leaderboard" id="leaderboard"></section>
 
+    <section class="team-boards" id="teamBoards"></section>
+
     <button id="btnPlanNextWeek" class="btn-secondary small" style="margin-bottom:14px;">📅 Nächste Woche schon planen</button>
 
     <div class="filter-row" id="filterRow">
@@ -99,15 +101,22 @@
     </div>
 
     <section class="settings-section">
-      <h3>WG-Mitglieder</h3>
-      <div id="quotaSumBox" class="quota-sum-box">Summe: 100%</div>
+      <h3>Mitglieder</h3>
       <div id="memberSettingsList" class="member-settings-list"></div>
       <div class="add-member-row">
         <input id="settingsNewMemberName" type="text" placeholder="Neues Mitglied…" maxlength="24">
         <button id="btnSettingsAddMember" class="btn-primary small">Hinzufügen</button>
       </div>
-      <button id="btnEvenSplit" class="btn-secondary small" style="margin-top:10px;">Gleichmäßig verteilen</button>
-      <p class="hint">Der Soll-Anteil gibt an, wie viel vom WG-Haushalt eine Person übernehmen soll. Die Summe aller Anteile muss zwischen 98% und 100% liegen, sonst wird eine Änderung nicht gespeichert.</p>
+      <p class="hint">Der Soll-Anteil wird pro Team festgelegt (siehe „Teams" unten) – eine Person kann in mehreren Teams mit unterschiedlichem Anteil sein.</p>
+    </section>
+
+    <section class="settings-section">
+      <div class="view-header" style="margin-bottom:12px;">
+        <h3 style="margin:0;">Teams</h3>
+        <button id="btnAddTeam" class="fab-inline">＋ Team erstellen</button>
+      </div>
+      <div id="teamsList" class="teams-list"></div>
+      <p class="hint">Max. 5 Teams. Innerhalb eines Teams muss die Summe der Soll-Anteile zwischen 98% und 100% liegen.</p>
     </section>
 
     <section class="settings-section">
@@ -124,7 +133,7 @@
     <section class="settings-section">
       <h3>WG verlassen</h3>
       <button id="btnLeaveWg" class="btn-secondary">WG verlassen</button>
-      <p class="hint">Du kommst zurück zum Start und kannst jederzeit mit dem Beitrittscode wieder einsteigen. Mitglieder entfernen geht oben bei „WG-Mitglieder" über das ✕.</p>
+      <p class="hint">Du kommst zurück zum Start und kannst jederzeit mit dem Beitrittscode wieder einsteigen. Mitglieder entfernen geht oben bei „Mitglieder" über das ✕.</p>
     </section>
   </main>
 
@@ -165,12 +174,41 @@
       <div id="assigneeChips" class="assignee-chips"></div>
       <p class="hint">Niemand ausgewählt = Aufgabe gilt für alle.</p>
     </div>
-    <p class="hint hidden" id="rotatingHint">Rotiert automatisch wöchentlich unter allen WG-Mitgliedern – mit dem Ziel, dass am Monatsende alle möglichst nah an ihrem Soll-Anteil liegen. Dieselbe Person macht eine Aufgabe höchstens 2 Wochen in Folge.</p>
+    <div id="rotatingSection" class="hidden">
+      <p class="hint" id="rotatingHint">Rotiert automatisch wöchentlich – mit dem Ziel, dass alle möglichst nah an ihrem Soll-Anteil liegen. Dieselbe Person macht eine Aufgabe höchstens 2 Wochen in Folge.</p>
+      <label class="field-label">Team(s) für die Rotation</label>
+      <div id="taskTeamChips" class="assignee-chips"></div>
+      <p class="hint">Keine Auswahl = rotiert über alle Mitglieder (teamübergreifend).</p>
+    </div>
 
     <div class="modal-actions">
       <button id="btnDeleteTask" class="btn-danger small hidden">Löschen</button>
       <button id="btnCancelTask" class="btn-text">Abbrechen</button>
       <button id="btnSaveTask" class="btn-primary">Speichern</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ TEAM EDITOR MODAL ============ -->
+<div id="teamModal" class="modal-overlay">
+  <div class="modal-sheet">
+    <div class="modal-handle"></div>
+    <h2 id="teamModalTitle">Neues Team</h2>
+
+    <label class="field-label">Teamname</label>
+    <input id="teamName" type="text" placeholder="z. B. Putzen" maxlength="30">
+
+    <label class="field-label">Mitglieder im Team</label>
+    <div id="teamMemberChips" class="assignee-chips"></div>
+
+    <div id="teamQuotaRows" class="team-quota-rows"></div>
+    <div id="teamQuotaSumBox" class="quota-sum-box">Noch keine Mitglieder im Team</div>
+    <button id="btnTeamEvenSplit" class="btn-secondary small" style="margin-top:4px;">Gleichmäßig verteilen</button>
+
+    <div class="modal-actions">
+      <button id="btnDeleteTeam" class="btn-danger small hidden">Löschen</button>
+      <button id="btnCancelTeam" class="btn-text">Abbrechen</button>
+      <button id="btnSaveTeam" class="btn-primary">Speichern</button>
     </div>
   </div>
 </div>
