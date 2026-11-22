@@ -16,10 +16,11 @@ let state = {
   tasks: [],
   completions: [],
   taskAssignments: [], // { task_id, week_start, member_id } - wer eine rotierende Aufgabe in welcher Woche macht
+  teams: [], // { id, wg_id, name }
+  teamMembers: [], // { team_id, member_id, quota_percent, points } - Mitgliedschaft + Soll-Anteil + Team-Punkte
   me: null,
   homeFilter: "all",
 };
-let quotaInteracting = false; // true solange ein Soll-Anteil-Regler aktiv bedient wird
 
 // ---------------- INIT ----------------
 
@@ -83,12 +84,14 @@ function enterApp() {
 // ---------------- DATA LOADING ----------------
 
 async function loadData() {
-  const [membersRes, tasksRes] = await Promise.all([
+  const [membersRes, tasksRes, teamsRes] = await Promise.all([
     sb.from("members").select("*").eq("wg_id", state.wg.id).order("created_at"),
     sb.from("tasks").select("*").eq("wg_id", state.wg.id).order("created_at"),
+    sb.from("teams").select("*").eq("wg_id", state.wg.id).order("created_at"),
   ]);
   state.members = membersRes.data || [];
   state.tasks = tasksRes.data || [];
+  state.teams = teamsRes.data || [];
 
   // Verlauf (completions) und Wochen-Zuteilungen (task_assignments) haben
   // keine eigene wg_id-Spalte, daher über die Aufgaben-IDs dieser WG filtern.
@@ -104,12 +107,22 @@ async function loadData() {
     state.completions = [];
     state.taskAssignments = [];
   }
+
+  const teamIds = state.teams.map((t) => t.id);
+  if (teamIds.length > 0) {
+    const tmRes = await sb.from("team_members").select("*").in("team_id", teamIds);
+    state.teamMembers = tmRes.data || [];
+  } else {
+    state.teamMembers = [];
+  }
 }
 
 function subscribeRealtime() {
   sb.channel("wg_" + state.wg.id)
     .on("postgres_changes", { event: "*", schema: "public", table: "members", filter: "wg_id=eq." + state.wg.id }, onRemoteChange)
     .on("postgres_changes", { event: "*", schema: "public", table: "tasks", filter: "wg_id=eq." + state.wg.id }, onRemoteChange)
+    .on("postgres_changes", { event: "*", schema: "public", table: "teams", filter: "wg_id=eq." + state.wg.id }, onRemoteChange)
+    .on("postgres_changes", { event: "*", schema: "public", table: "team_members" }, onRemoteChange)
     .subscribe();
 }
 
@@ -212,14 +225,24 @@ async function addMemberOnboard() {
 async function renderAll() {
   await planWeek(getWeekStart(new Date()));
   renderLeaderboard();
+  renderTeamBoards();
   renderFilterRow();
   renderHomeTaskList();
   renderTasksView();
   renderHistory();
   renderSettingsMembers();
+  renderTeamsSettings();
   document.getElementById("wgCodeBox").textContent = state.wg.code;
   document.getElementById("wgNameLabel").textContent = state.wg.name;
   document.getElementById("meLabel").textContent = state.me ? "👤 " + state.me.name : "";
+}
+
+// Kombinierter Soll-Anteil einer Person: einfacher Durchschnitt ihrer
+// Quoten über alle Teams, in denen sie Mitglied ist. null = in keinem Team.
+function combinedQuotaForMember(memberId) {
+  const rows = state.teamMembers.filter((tm) => tm.member_id === memberId);
+  if (rows.length === 0) return null;
+  return rows.reduce((s, r) => s + Number(r.quota_percent), 0) / rows.length;
 }
 
 function renderLeaderboard() {
@@ -240,7 +263,7 @@ function renderLeaderboard() {
     row.className = "member-row" + (m.points === minPoints ? " low-rank" : "");
     const pct = Math.round((m.points / maxPoints) * 100);
     const actualShare = totalPoints > 0 ? (m.points / totalPoints) * 100 : 0;
-    const targetPct = Number(m.quota_percent);
+    const targetPct = combinedQuotaForMember(m.id); // kombiniert über alle Teams dieser Person, oder null
 
     row.innerHTML = `
       <div class="member-row-top">
@@ -250,9 +273,9 @@ function renderLeaderboard() {
       <div class="bar-track"><div class="bar-fill" style="width:0%" data-target="${pct}"></div></div>
       <div class="share-track">
         <div class="share-fill" style="width:0%" data-target="${actualShare}"></div>
-        <div class="share-target-marker" style="left:${Math.min(99, targetPct)}%"></div>
+        ${targetPct !== null ? `<div class="share-target-marker" style="left:${Math.min(99, targetPct)}%"></div>` : ""}
       </div>
-      <div class="share-label"><span>Ist-Anteil: ${Math.round(actualShare)}%</span><span>Soll: ${Math.round(targetPct)}%</span></div>
+      <div class="share-label"><span>Ist-Anteil: ${Math.round(actualShare)}%</span><span>Soll: ${targetPct !== null ? Math.round(targetPct) + "%" : "– (kein Team)"}</span></div>
     `;
     el.appendChild(row);
   });
@@ -264,6 +287,35 @@ function renderLeaderboard() {
     el.querySelectorAll(".share-fill").forEach((bar) => {
       bar.style.width = bar.dataset.target + "%";
     });
+  });
+}
+
+// Einfaches, zusätzliches Balkendiagramm pro Team (Punkte je Mitglied
+// innerhalb dieses Teams) - nur Teams mit Mitgliedern werden angezeigt.
+function renderTeamBoards() {
+  const el = document.getElementById("teamBoards");
+  if (!el) return;
+  el.innerHTML = "";
+  state.teams.forEach((team) => {
+    const rows = state.teamMembers.filter((tm) => tm.team_id === team.id);
+    if (rows.length === 0) return;
+    const maxPts = Math.max(1, ...rows.map((r) => Number(r.points)));
+    const card = document.createElement("div");
+    card.className = "team-board-card";
+    const rowsHtml = rows
+      .map((r) => {
+        const pct = Math.round((Number(r.points) / maxPts) * 100);
+        return `
+          <div class="team-board-row">
+            <span class="team-board-name">${escapeHtml(memberName(r.member_id))}</span>
+            <span class="team-board-pts">${r.points} P. <small>(Soll ${Math.round(Number(r.quota_percent))}%)</small></span>
+          </div>
+          <div class="bar-track small"><div class="bar-fill" style="width:${pct}%"></div></div>
+        `;
+      })
+      .join("");
+    card.innerHTML = `<div class="team-board-title">${escapeHtml(team.name)}</div>${rowsHtml}`;
+    el.appendChild(card);
   });
 }
 
@@ -403,6 +455,35 @@ function assignmentFor(taskId, weekStartStr) {
   return row ? row.member_id : null;
 }
 
+// Ein "Fairness-Kontext" ist entweder ein bestimmtes Team (oder eine feste
+// Kombination mehrerer Teams), oder - wenn eine Aufgabe auf kein Team
+// eingeschränkt ist - "__all__" (teamübergreifend, alle Mitglieder).
+function scopeKeyForTask(task) {
+  if (task.team_ids && task.team_ids.length) {
+    return [...task.team_ids].sort().join(",");
+  }
+  return "__all__";
+}
+
+// Alle Mitglieder, die zu diesem Fairness-Kontext gehören.
+function poolForScope(scopeKey) {
+  if (scopeKey === "__all__") return state.members.map((m) => m.id);
+  const teamIds = scopeKey.split(",");
+  return [...new Set(state.teamMembers.filter((tm) => teamIds.includes(tm.team_id)).map((tm) => tm.member_id))];
+}
+
+// Soll-Anteil (Durchschnitt über die beteiligten Teams) und bereits verdiente
+// Team-Punkte (Summe über die beteiligten Teams) einer Person in diesem
+// Kontext. null = die Person ist in keinem der beteiligten Teams Mitglied.
+function quotaAndEarnedForScope(memberId, scopeKey) {
+  const teamIds = scopeKey === "__all__" ? state.teams.map((t) => t.id) : scopeKey.split(",");
+  const rows = state.teamMembers.filter((tm) => tm.member_id === memberId && teamIds.includes(tm.team_id));
+  if (rows.length === 0) return null;
+  const quota = rows.reduce((s, r) => s + Number(r.quota_percent), 0) / rows.length;
+  const earned = rows.reduce((s, r) => s + Number(r.points), 0);
+  return { quota, earned };
+}
+
 // Plant eine bestimmte Kalenderwoche (weekStart = Montag dieser Woche) für alle
 // rotierenden Aufgaben, die in dieser Woche auch tatsächlich fällig/überfällig
 // sind - und nur für die, die für diese Woche noch keine Zuteilung haben.
@@ -411,13 +492,15 @@ function assignmentFor(taskId, weekStartStr) {
 // erledigt wurde und erst in 2 Wochen wieder fällig ist, wird dementsprechend
 // NICHT für die kommende Woche eingeplant - sie taucht erst wieder auf, wenn
 // ihre Fälligkeit tatsächlich in eine Woche fällt.
+//
+// Jedes Team (bzw. jede Team-Kombination/die teamübergreifende "Alle"-Gruppe)
+// ist dabei eine eigene, unabhängige Fairness-Blase: eine Aufgabe für Team A
+// beeinflusst nie, wer in Team B dran ist.
 async function planWeek(weekStart) {
   if (state.members.length === 0) return;
 
   const weekStartStr = isoDateOnly(weekStart);
   const weekEnd = getWeekEnd(weekStart);
-  const now = new Date();
-  const monthStart = getMonthStart(now);
 
   const needsPlanning = state.tasks.filter((t) => {
     if (!t.rotation_enabled) return false;
@@ -426,57 +509,77 @@ async function planWeek(weekStart) {
   });
   if (needsPlanning.length === 0) return;
 
-  // Virtueller, hochgerechneter Punktestand je Mitglied in diesem Monat (auf
-  // Basis tatsächlich erzielter Punkte) - wird beim Verteilen laufend angepasst.
-  const virtualEarned = {};
-  state.members.forEach((m) => {
-    virtualEarned[m.id] = pointsEarnedInRange(m.id, monthStart, now);
+  // Nach Fairness-Kontext gruppieren - jeder Kontext wird unabhängig geplant.
+  const groups = {};
+  needsPlanning.forEach((t) => {
+    const key = scopeKeyForTask(t);
+    (groups[key] = groups[key] || []).push(t);
   });
-  let virtualTotal = Object.values(virtualEarned).reduce((a, b) => a + b, 0);
-
-  // Größte Punktwerte zuerst verteilen - die haben den größten Einfluss auf die Fairness.
-  needsPlanning.sort((a, b) => b.points - a.points);
 
   const inserts = [];
-  needsPlanning.forEach((t) => {
-    const fullPool = t.assigned_member_ids && t.assigned_member_ids.length
-      ? t.assigned_member_ids.filter((id) => state.members.some((m) => m.id === id))
-      : state.members.map((m) => m.id);
+
+  Object.keys(groups).forEach((scopeKey) => {
+    const fullPool = poolForScope(scopeKey);
     if (fullPool.length === 0) return;
 
-    // Harte Regel: höchstens 2 Wochen in Folge dieselbe Person - außer es gibt
-    // schlicht niemand anderen im Pool.
-    const forbidden = mustRotateAwayFrom(t.id, weekStart);
-    const pool = fullPool.length > 1 && forbidden ? fullPool.filter((id) => id !== forbidden) : fullPool;
+    // Virtueller, hochgerechneter Punktestand je Mitglied in diesem Kontext -
+    // wird beim Verteilen laufend angepasst. Basis sind die (rücksetzbaren)
+    // Team-Punkte bzw. bei "__all__" der kombinierte Wert über alle Teams
+    // dieser Person. Ist eine Person in keinem relevanten Team, greift ein
+    // einfacher Gleichverteilungs-Fallback (Soll = 1/Poolgröße, Ist = ihr
+    // globaler Punktestand), damit sie trotzdem fair mitrotiert.
+    const quotaFallback = 100 / fullPool.length;
+    const virtualEarned = {};
+    fullPool.forEach((id) => {
+      const qe = quotaAndEarnedForScope(id, scopeKey);
+      virtualEarned[id] = qe ? qe.earned : Number(state.members.find((m) => m.id === id)?.points) || 0;
+    });
+    let virtualTotal = Object.values(virtualEarned).reduce((a, b) => a + b, 0);
 
-    let best = null;
-    let bestDeficit = -Infinity;
-    let bestLastDone = Infinity;
+    // Größte Punktwerte zuerst verteilen - die haben den größten Einfluss auf die Fairness.
+    const tasksInScope = [...groups[scopeKey]].sort((a, b) => b.points - a.points);
 
-    pool.forEach((id) => {
-      const member = state.members.find((m) => m.id === id);
-      const idealShare = (Number(member.quota_percent) / 100) * virtualTotal;
-      const deficit = idealShare - (virtualEarned[id] || 0);
-      const lastDone = lastCompletedTaskAt(t.id, id);
-      const better =
-        deficit > bestDeficit + 0.001 ||
-        (Math.abs(deficit - bestDeficit) <= 0.001 && lastDone < bestLastDone);
-      if (better) {
-        best = id;
-        bestDeficit = deficit;
-        bestLastDone = lastDone;
+    tasksInScope.forEach((t) => {
+      const taskPool = t.assigned_member_ids && t.assigned_member_ids.length
+        ? t.assigned_member_ids.filter((id) => fullPool.includes(id))
+        : fullPool;
+      if (taskPool.length === 0) return;
+
+      // Harte Regel: höchstens 2 Wochen in Folge dieselbe Person - außer es gibt
+      // schlicht niemand anderen im Pool.
+      const forbidden = mustRotateAwayFrom(t.id, weekStart);
+      const pool = taskPool.length > 1 && forbidden ? taskPool.filter((id) => id !== forbidden) : taskPool;
+
+      let best = null;
+      let bestDeficit = -Infinity;
+      let bestLastDone = Infinity;
+
+      pool.forEach((id) => {
+        const qe = quotaAndEarnedForScope(id, scopeKey);
+        const quota = qe ? qe.quota : quotaFallback;
+        const idealShare = (quota / 100) * virtualTotal;
+        const deficit = idealShare - (virtualEarned[id] || 0);
+        const lastDone = lastCompletedTaskAt(t.id, id);
+        const better =
+          deficit > bestDeficit + 0.001 ||
+          (Math.abs(deficit - bestDeficit) <= 0.001 && lastDone < bestLastDone);
+        if (better) {
+          best = id;
+          bestDeficit = deficit;
+          bestLastDone = lastDone;
+        }
+      });
+
+      if (best) {
+        virtualEarned[best] = (virtualEarned[best] || 0) + t.points;
+        virtualTotal += t.points;
+        const row = { task_id: t.id, week_start: weekStartStr, member_id: best };
+        // Direkt im State ergänzen, damit die Anzeige sofort passt, ohne auf
+        // einen erneuten loadData()-Roundtrip warten zu müssen.
+        state.taskAssignments.push(row);
+        inserts.push(row);
       }
     });
-
-    if (best) {
-      virtualEarned[best] = (virtualEarned[best] || 0) + t.points;
-      virtualTotal += t.points;
-      const row = { task_id: t.id, week_start: weekStartStr, member_id: best };
-      // Direkt im State ergänzen, damit die Anzeige sofort passt, ohne auf
-      // einen erneuten loadData()-Roundtrip warten zu müssen.
-      state.taskAssignments.push(row);
-      inserts.push(row);
-    }
   });
 
   if (inserts.length > 0) {
@@ -630,6 +733,7 @@ document.getElementById("btnSwitchProfile").onclick = () => {
 
 let editingTaskId = null;
 let selectedAssignees = new Set();
+let selectedTaskTeams = new Set();
 let assignMode = "fixed"; // "fixed" | "rotating"
 
 document.getElementById("cycleDaysSlider").oninput = (e) => {
@@ -654,6 +758,9 @@ function openTaskModal(task) {
   selectedAssignees = new Set(task && task.assigned_member_ids ? task.assigned_member_ids : []);
   renderAssigneeChips();
 
+  selectedTaskTeams = new Set(task && task.team_ids ? task.team_ids : []);
+  renderTaskTeamChips();
+
   assignMode = task && task.rotation_enabled ? "rotating" : "fixed";
   updateAssignModeUI();
 
@@ -665,9 +772,10 @@ function updateAssignModeUI() {
   document.querySelectorAll(".mode-btn").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.mode === assignMode);
   });
-  // Bei "Rotierend" rotieren immer alle WG-Mitglieder - keine Personen-Auswahl nötig.
+  // Bei "Rotierend" rotieren immer alle Mitglieder des/der gewählten Teams
+  // (bzw. teamübergreifend alle) - keine einzelne Personen-Auswahl nötig.
   document.getElementById("fixedAssigneeSection").classList.toggle("hidden", assignMode === "rotating");
-  document.getElementById("rotatingHint").classList.toggle("hidden", assignMode !== "rotating");
+  document.getElementById("rotatingSection").classList.toggle("hidden", assignMode !== "rotating");
 }
 
 document.querySelectorAll(".mode-btn").forEach((btn) => {
@@ -693,6 +801,26 @@ function renderAssigneeChips() {
   });
 }
 
+function renderTaskTeamChips() {
+  const wrap = document.getElementById("taskTeamChips");
+  wrap.innerHTML = "";
+  if (state.teams.length === 0) {
+    wrap.innerHTML = '<p class="hint">Noch keine Teams angelegt (Einstellungen → Teams).</p>';
+    return;
+  }
+  state.teams.forEach((team) => {
+    const chip = document.createElement("div");
+    chip.className = "assignee-chip" + (selectedTaskTeams.has(team.id) ? " selected" : "");
+    chip.textContent = team.name;
+    chip.onclick = () => {
+      if (selectedTaskTeams.has(team.id)) selectedTaskTeams.delete(team.id);
+      else selectedTaskTeams.add(team.id);
+      renderTaskTeamChips();
+    };
+    wrap.appendChild(chip);
+  });
+}
+
 function closeTaskModal() {
   document.getElementById("taskModal").classList.remove("show");
   editingTaskId = null;
@@ -709,9 +837,11 @@ document.getElementById("btnSaveTask").onclick = async () => {
     details: document.getElementById("taskDetails").value.trim(),
     cycle_days: parseInt(document.getElementById("cycleDaysSlider").value, 10),
     points: parseInt(document.getElementById("pointsSlider").value, 10),
-    // Rotierend = immer alle Mitglieder, keine Pool-Einschränkung mehr möglich.
+    // Rotierend = immer das/die gewählte(n) Team(s) bzw. alle, keine einzelne
+    // Personen-Auswahl mehr möglich.
     assigned_member_ids: assignMode === "rotating" ? [] : Array.from(selectedAssignees),
     rotation_enabled: assignMode === "rotating",
+    team_ids: assignMode === "rotating" ? Array.from(selectedTaskTeams) : [],
   };
 
   if (editingTaskId) {
@@ -807,6 +937,22 @@ document.getElementById("btnCompleteTask").onclick = async () => {
 
   await sb.from("completions").insert({ task_id: task.id, member_id: detailDoneBy, points: task.points });
 
+  // Team-Punkte erhöhen, falls die Aufgabe (bei "Rotierend") einem oder
+  // mehreren Teams zugeordnet ist - universelle Aufgaben ohne Teamwahl
+  // zählen nur in den globalen Punktestand, nicht in einzelne Team-Ledger.
+  if (task.team_ids && task.team_ids.length) {
+    for (const teamId of task.team_ids) {
+      const tm = state.teamMembers.find((x) => x.team_id === teamId && x.member_id === detailDoneBy);
+      if (tm) {
+        await sb
+          .from("team_members")
+          .update({ points: Number(tm.points) + task.points })
+          .eq("team_id", teamId)
+          .eq("member_id", detailDoneBy);
+      }
+    }
+  }
+
   document.getElementById("detailModal").classList.remove("show");
   await loadData();
   if (state.me) state.me = state.members.find((m) => m.id === state.me.id) || state.me;
@@ -815,102 +961,29 @@ document.getElementById("btnCompleteTask").onclick = async () => {
   showToast(`✓ Erledigt! +${task.points} Punkte für ${memberName(detailDoneBy)}`);
 };
 
-// ---------------- SETTINGS ----------------
-
-function quotaSum() {
-  return state.members.reduce((s, m) => s + Number(m.quota_percent), 0);
-}
-
-function renderQuotaSumBox() {
-  const box = document.getElementById("quotaSumBox");
-  if (!box) return;
-  if (state.members.length === 0) {
-    box.textContent = "Noch keine Mitglieder";
-    box.className = "quota-sum-box invalid";
-    return;
-  }
-  const sum = Math.round(quotaSum() * 10) / 10;
-  const sumDisplay = Math.round(sum);
-  // Gültigkeit anhand der gerundeten, angezeigten Zahl prüfen (nicht der
-  // exakten Nachkommazahl) - sonst kann die Box z.B. "100%" anzeigen und
-  // trotzdem rot sein, weil im Hintergrund 100,1 o.ä. steckt.
-  const valid = sumDisplay >= 98 && sumDisplay <= 100;
-  box.textContent = valid
-    ? `Summe der Soll-Anteile: ${sumDisplay}% ✓`
-    : `Summe der Soll-Anteile: ${sumDisplay}% (muss zwischen 98% und 100% liegen)`;
-  box.className = "quota-sum-box " + (valid ? "valid" : "invalid");
-}
+// ---------------- SETTINGS: MITGLIEDER ----------------
 
 function renderSettingsMembers() {
-  // Während jemand gerade einen Regler bewegt, nicht neu aufbauen -
-  // sonst reißt ein zeitgleiches Live-Sync-Update die Bedienung ab.
-  // Zwei unabhängige Prüfungen, falls ein Event-Typ im Browser mal nicht feuert.
-  const focusedInSlider =
-    document.activeElement && document.activeElement.closest(".quota-slider-wrap");
-  if (quotaInteracting || focusedInSlider) return;
-
-  renderQuotaSumBox();
   const list = document.getElementById("memberSettingsList");
+  if (!list) return;
   list.innerHTML = "";
+  if (state.members.length === 0) {
+    list.innerHTML = '<p class="empty-state">Noch keine Mitglieder.</p>';
+    return;
+  }
   state.members.forEach((m) => {
     const row = document.createElement("div");
     row.className = "member-settings-row";
-    const displayVal = Math.round(Number(m.quota_percent));
     row.innerHTML = `
       <div class="member-settings-name">${escapeHtml(m.name)}</div>
-      <div class="quota-slider-wrap">
-        <input type="range" min="0" max="100" step="1" value="${displayVal}" class="slider" data-id="${m.id}">
-        <span class="quota-value">${displayVal}%</span>
-      </div>
       <button class="remove-member-btn" data-id="${m.id}">✕</button>
     `;
     list.appendChild(row);
   });
 
-  list.querySelectorAll('input[type="range"]').forEach((slider) => {
-    const markActive = () => {
-      quotaInteracting = true;
-    };
-    // Mehrere Event-Typen, da je nach Browser/Eingabeart (Maus, Touch,
-    // Safari-Responsive-Modus) nicht immer dieselben Events zuverlässig feuern.
-    slider.addEventListener("pointerdown", markActive);
-    slider.addEventListener("mousedown", markActive);
-    slider.addEventListener("touchstart", markActive, { passive: true });
-    slider.addEventListener("focus", markActive);
-    slider.addEventListener("blur", () => {
-      quotaInteracting = false;
-    });
-    slider.oninput = (e) => {
-      e.target.closest(".member-settings-row").querySelector(".quota-value").textContent =
-        e.target.value + "%";
-    };
-    slider.onchange = async (e) => {
-      // Beim manuellen Ziehen immer ganze Prozent speichern, damit Anzeige
-      // und gespeicherter Wert exakt übereinstimmen (keine Nachkomma-Drift,
-      // die die Summenanzeige auf z.B. 101% springen lässt). Nachkommastellen
-      // gibt es nur, wenn "Gleichmäßig verteilen" das für eine ungerade
-      // Mitgliederzahl braucht.
-      const newVal = Math.round(parseFloat(e.target.value));
-      quotaInteracting = false;
-      e.target.blur(); // Fokus abgeben, damit der anstehende Re-Render nicht blockiert wird
-      const { error } = await sb
-        .from("members")
-        .update({ quota_percent: newVal })
-        .eq("id", e.target.dataset.id);
-      if (error) {
-        // Speichern ist fehlgeschlagen (z.B. weil die Datenbank-Spalte noch
-        // keine Nachkommastellen zulässt) - Nutzer informieren statt stillschweigend
-        // auf den alten Wert zurückzuspringen.
-        showToast("⚠️ Speichern fehlgeschlagen: " + error.message);
-      }
-      await loadData();
-      await renderAll();
-    };
-  });
-
   list.querySelectorAll(".remove-member-btn").forEach((btn) => {
     btn.onclick = async () => {
-      if (!confirm("Dieses Mitglied wirklich entfernen?")) return;
+      if (!confirm("Dieses Mitglied wirklich entfernen? Es wird dadurch auch aus allen Teams entfernt.")) return;
       await sb.from("members").delete().eq("id", btn.dataset.id);
       await loadData();
       await renderAll();
@@ -918,33 +991,218 @@ function renderSettingsMembers() {
   });
 }
 
-async function evenlySplitQuotas() {
-  const n = state.members.length;
-  if (n === 0) return;
-  const base = Math.floor(1000 / n) / 10; // eine Nachkommastelle, abgerundet
-  const values = new Array(n).fill(base);
-  let remainder = Math.round((100 - base * n) * 10) / 10;
-  let i = 0;
-  while (remainder > 0.05) {
-    values[i % n] = Math.round((values[i % n] + 0.1) * 10) / 10;
-    remainder = Math.round((remainder - 0.1) * 10) / 10;
-    i++;
+// ---------------- SETTINGS: TEAMS ----------------
+
+let editingTeamId = null;
+let teamSelectedMembers = new Set();
+let teamQuotaValues = {}; // memberId -> Zahl (Soll-Anteil in %), während das Team-Modal offen ist
+
+function renderTeamsSettings() {
+  const list = document.getElementById("teamsList");
+  if (!list) return;
+  list.innerHTML = "";
+  if (state.teams.length === 0) {
+    list.innerHTML = '<p class="empty-state">Noch keine Teams. Lege eines an, um Soll-Anteile festzulegen.</p>';
   }
-  const updates = state.members.map((m, idx) =>
-    sb.from("members").update({ quota_percent: values[idx] }).eq("id", m.id)
-  );
-  const results = await Promise.all(updates);
-  const failed = results.find((r) => r.error);
-  if (failed) {
-    showToast("⚠️ Speichern fehlgeschlagen: " + failed.error.message);
-  } else {
-    showToast("Gleichmäßig verteilt ✓");
-  }
-  await loadData();
-  await renderAll();
+  state.teams.forEach((team) => {
+    const rows = state.teamMembers.filter((tm) => tm.team_id === team.id);
+    const sum = Math.round(rows.reduce((s, r) => s + Number(r.quota_percent), 0));
+    const valid = rows.length > 0 && sum >= 98 && sum <= 100;
+    const card = document.createElement("div");
+    card.className = "team-card";
+    card.innerHTML = `
+      <div class="team-card-top">
+        <div class="team-card-name">${escapeHtml(team.name)}</div>
+        <span class="team-card-badge ${valid ? "valid" : "invalid"}">${sum}%</span>
+      </div>
+      <div class="team-card-members">${
+        rows.length
+          ? rows.map((r) => `${escapeHtml(memberName(r.member_id))} ${Math.round(Number(r.quota_percent))}%`).join(" · ")
+          : "Keine Mitglieder"
+      }</div>
+      <button class="btn-secondary small team-edit-btn" data-id="${team.id}" style="margin-top:8px;">Bearbeiten</button>
+    `;
+    list.appendChild(card);
+  });
+  list.querySelectorAll(".team-edit-btn").forEach((btn) => {
+    btn.onclick = () => {
+      const team = state.teams.find((t) => t.id === btn.dataset.id);
+      if (team) openTeamModal(team);
+    };
+  });
+  document.getElementById("btnAddTeam").classList.toggle("hidden", state.teams.length >= 5);
 }
 
-document.getElementById("btnEvenSplit").onclick = evenlySplitQuotas;
+function openTeamModal(team) {
+  editingTeamId = team ? team.id : null;
+  document.getElementById("teamModalTitle").textContent = team ? "Team bearbeiten" : "Neues Team";
+  document.getElementById("teamName").value = team ? team.name : "";
+
+  teamSelectedMembers = new Set(
+    team ? state.teamMembers.filter((tm) => tm.team_id === team.id).map((tm) => tm.member_id) : []
+  );
+  teamQuotaValues = {};
+  if (team) {
+    state.teamMembers
+      .filter((tm) => tm.team_id === team.id)
+      .forEach((tm) => {
+        teamQuotaValues[tm.member_id] = Number(tm.quota_percent);
+      });
+  }
+
+  renderTeamMemberChips();
+  renderTeamQuotaRows();
+  document.getElementById("btnDeleteTeam").classList.toggle("hidden", !team);
+  document.getElementById("teamModal").classList.add("show");
+}
+
+function closeTeamModal() {
+  document.getElementById("teamModal").classList.remove("show");
+  editingTeamId = null;
+}
+
+function renderTeamMemberChips() {
+  const wrap = document.getElementById("teamMemberChips");
+  wrap.innerHTML = "";
+  if (state.members.length === 0) {
+    wrap.innerHTML = '<p class="hint">Noch keine Mitglieder in der WG.</p>';
+    return;
+  }
+  state.members.forEach((m) => {
+    const chip = document.createElement("div");
+    chip.className = "assignee-chip" + (teamSelectedMembers.has(m.id) ? " selected" : "");
+    chip.textContent = m.name;
+    chip.onclick = () => {
+      if (teamSelectedMembers.has(m.id)) {
+        teamSelectedMembers.delete(m.id);
+        delete teamQuotaValues[m.id];
+      } else {
+        teamSelectedMembers.add(m.id);
+        if (teamQuotaValues[m.id] === undefined) teamQuotaValues[m.id] = 0;
+      }
+      renderTeamMemberChips();
+      renderTeamQuotaRows();
+    };
+    wrap.appendChild(chip);
+  });
+}
+
+function renderTeamQuotaRows() {
+  const wrap = document.getElementById("teamQuotaRows");
+  wrap.innerHTML = "";
+  state.members
+    .filter((m) => teamSelectedMembers.has(m.id))
+    .forEach((m) => {
+      const row = document.createElement("div");
+      row.className = "team-quota-row";
+      row.innerHTML = `
+        <div class="team-quota-name">${escapeHtml(m.name)}</div>
+        <input type="number" min="0" max="100" step="1" class="quota-number-input" data-id="${m.id}" value="${teamQuotaValues[m.id] ?? 0}">
+        <span class="quota-percent-sign">%</span>
+      `;
+      wrap.appendChild(row);
+    });
+  wrap.querySelectorAll(".quota-number-input").forEach((inp) => {
+    inp.oninput = (e) => {
+      teamQuotaValues[e.target.dataset.id] = Number(e.target.value) || 0;
+      renderTeamQuotaSumBox();
+    };
+  });
+  renderTeamQuotaSumBox();
+}
+
+function renderTeamQuotaSumBox() {
+  const box = document.getElementById("teamQuotaSumBox");
+  if (!box) return;
+  if (teamSelectedMembers.size === 0) {
+    box.textContent = "Noch keine Mitglieder im Team";
+    box.className = "quota-sum-box invalid";
+    return;
+  }
+  const sum = Math.round(Object.values(teamQuotaValues).reduce((a, b) => a + Number(b || 0), 0));
+  const valid = sum >= 98 && sum <= 100;
+  box.textContent = valid ? `Summe: ${sum}% ✓` : `Summe: ${sum}% (muss zwischen 98% und 100% liegen)`;
+  box.className = "quota-sum-box " + (valid ? "valid" : "invalid");
+}
+
+document.getElementById("btnTeamEvenSplit").onclick = () => {
+  const ids = Array.from(teamSelectedMembers);
+  const n = ids.length;
+  if (n === 0) return;
+  const base = Math.floor(100 / n);
+  const remainder = 100 - base * n;
+  ids.forEach((id, idx) => {
+    teamQuotaValues[id] = base + (idx < remainder ? 1 : 0);
+  });
+  renderTeamQuotaRows();
+};
+
+document.getElementById("btnAddTeam").onclick = () => {
+  if (state.teams.length >= 5) return showToast("Maximal 5 Teams möglich.");
+  openTeamModal(null);
+};
+document.getElementById("btnCancelTeam").onclick = closeTeamModal;
+
+document.getElementById("btnSaveTeam").onclick = async () => {
+  const name = document.getElementById("teamName").value.trim();
+  if (!name) return showToast("Bitte einen Teamnamen eingeben.");
+  if (teamSelectedMembers.size === 0) return showToast("Bitte mindestens ein Mitglied auswählen.");
+  const sum = Math.round(Object.values(teamQuotaValues).reduce((a, b) => a + Number(b || 0), 0));
+  if (sum < 98 || sum > 100) return showToast("Die Soll-Anteile müssen zusammen zwischen 98% und 100% ergeben.");
+
+  let teamId = editingTeamId;
+  if (teamId) {
+    const { error } = await sb.from("teams").update({ name }).eq("id", teamId);
+    if (error) return showToast("Fehler: " + error.message);
+  } else {
+    const { data, error } = await sb.from("teams").insert({ wg_id: state.wg.id, name }).select().single();
+    if (error) return showToast("Fehler: " + error.message);
+    teamId = data.id;
+  }
+
+  // Team-Mitgliedschaften abgleichen: abgewählte Personen entfernen, Rest upserten.
+  const existingRows = state.teamMembers.filter((tm) => tm.team_id === teamId);
+  for (const tm of existingRows) {
+    if (!teamSelectedMembers.has(tm.member_id)) {
+      await sb.from("team_members").delete().eq("team_id", teamId).eq("member_id", tm.member_id);
+    }
+  }
+  const upserts = Array.from(teamSelectedMembers).map((memberId) => {
+    const existing = existingRows.find((tm) => tm.member_id === memberId);
+    return {
+      team_id: teamId,
+      member_id: memberId,
+      quota_percent: Number(teamQuotaValues[memberId]) || 0,
+      points: existing ? existing.points : 0,
+    };
+  });
+  if (upserts.length) {
+    const { error } = await sb.from("team_members").upsert(upserts, { onConflict: "team_id,member_id" });
+    if (error) return showToast("Fehler: " + error.message);
+  }
+
+  closeTeamModal();
+  await loadData();
+  await renderAll();
+  showToast("Team gespeichert ✓");
+};
+
+document.getElementById("btnDeleteTeam").onclick = async () => {
+  if (!editingTeamId) return;
+  if (!confirm("Dieses Team wirklich löschen?")) return;
+  // Aufgaben, die (auch) dieses Team nutzen, von der Teamzuordnung befreien,
+  // damit sie nicht "verwaist" auf ein gelöschtes Team zeigen.
+  const affectedTasks = state.tasks.filter((t) => t.team_ids && t.team_ids.includes(editingTeamId));
+  for (const t of affectedTasks) {
+    const newTeamIds = t.team_ids.filter((id) => id !== editingTeamId);
+    await sb.from("tasks").update({ team_ids: newTeamIds }).eq("id", t.id);
+  }
+  await sb.from("teams").delete().eq("id", editingTeamId);
+  closeTeamModal();
+  await loadData();
+  await renderAll();
+  showToast("Team gelöscht ✓");
+};
 
 document.getElementById("btnPlanNextWeek").onclick = async () => {
   const nextWeekStart = getWeekEnd(getWeekStart(new Date())); // = Montag der kommenden Woche
@@ -961,7 +1219,17 @@ document.getElementById("btnLeaveWg").onclick = () => {
   localStorage.removeItem(LS.wgCode);
   localStorage.removeItem(LS.wgName);
   localStorage.removeItem(LS.memberId);
-  state = { wg: null, members: [], tasks: [], completions: [], taskAssignments: [], me: null, homeFilter: "all" };
+  state = {
+    wg: null,
+    members: [],
+    tasks: [],
+    completions: [],
+    taskAssignments: [],
+    teams: [],
+    teamMembers: [],
+    me: null,
+    homeFilter: "all",
+  };
   document.getElementById("newWgName").value = "";
   document.getElementById("joinCode").value = "";
   showScreen("onboarding");
@@ -981,6 +1249,10 @@ document.getElementById("btnSettingsAddMember").onclick = async () => {
 document.getElementById("btnResetPoints").onclick = async () => {
   if (!confirm("Wirklich alle Punktestände auf 0 setzen?")) return;
   await sb.from("members").update({ points: 0 }).eq("wg_id", state.wg.id);
+  const teamIds = state.teams.map((t) => t.id);
+  if (teamIds.length > 0) {
+    await sb.from("team_members").update({ points: 0 }).in("team_id", teamIds);
+  }
   await loadData();
   await renderAll();
 };
