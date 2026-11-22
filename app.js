@@ -17,7 +17,6 @@ let state = {
   completions: [],
   me: null,
   homeFilter: "all",
-  weekPlan: {}, // taskId -> memberId, wer diese Kalenderwoche für rotierende Aufgaben dran ist
 };
 let quotaInteracting = false; // true solange ein Soll-Anteil-Regler aktiv bedient wird
 
@@ -116,7 +115,7 @@ async function onRemoteChange() {
   await loadData();
   const meRefresh = state.members.find((m) => m.id === (state.me && state.me.id));
   if (meRefresh) state.me = meRefresh;
-  renderAll();
+  await renderAll();
 }
 
 // ---------------- ONBOARDING ----------------
@@ -208,8 +207,8 @@ async function addMemberOnboard() {
 
 // ---------------- RENDER: HOME ----------------
 
-function renderAll() {
-  state.weekPlan = computeWeekPlan();
+async function renderAll() {
+  await ensureWeekPlan();
   renderLeaderboard();
   renderFilterRow();
   renderHomeTaskList();
@@ -387,35 +386,52 @@ function mustRotateAwayFrom(taskId, thisWeekStart) {
   return null;
 }
 
-// Berechnet, wer für jede rotierende Aufgabe, die in der laufenden Kalenderwoche
-// fällig wird, eingeplant ist - mit dem Ziel, dass alle über den Monat hinweg
-// möglichst nah an ihren Soll-Anteil kommen. Wird zustandslos bei jedem Rendern
-// neu berechnet (keine eigene Speicherung nötig, bleibt dadurch immer synchron).
-function computeWeekPlan() {
-  const plan = {};
-  if (state.members.length === 0) return plan;
+// Datum als "YYYY-MM-DD" in LOKALER Zeit (nicht toISOString(), das würde bei
+// Zeitzonen wie UTC+1 auf den falschen Kalendertag verschieben).
+function isoDateOnly(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+// Legt fest, wer für jede rotierende Aufgabe diese Kalenderwoche zuständig ist -
+// und zwar NUR EINMAL pro Woche. Das Ergebnis wird direkt an der Aufgabe
+// gespeichert (rotation_assignee_id/rotation_week_start) und bleibt für den
+// Rest der Woche unverändert, egal wie viele Aufgaben zwischendurch erledigt
+// werden. Ohne diese Sperre würde jede Erledigung die Fairness-Rechnung neu
+// mischen und Aufgaben mitten in der Woche von einer Person zur anderen
+// "springen" lassen - genau das soll das hier verhindern.
+async function ensureWeekPlan() {
+  if (state.members.length === 0) return;
 
   const now = new Date();
   const weekStart = getWeekStart(now);
-  const weekEnd = getWeekEnd(weekStart);
+  const weekStartStr = isoDateOnly(weekStart);
   const monthStart = getMonthStart(now);
 
-  // Virtueller, hochgerechneter Punktestand je Mitglied in diesem Monat -
-  // wird während der Verteilung innerhalb der Woche laufend angepasst.
+  const rotatingTasks = state.tasks.filter((t) => t.rotation_enabled);
+  const needsPlanning = rotatingTasks.filter((t) => {
+    if (t.rotation_week_start !== weekStartStr) return true; // neue Woche
+    if (!t.rotation_assignee_id) return true;
+    if (!state.members.some((m) => m.id === t.rotation_assignee_id)) return true; // Mitglied existiert nicht mehr
+    return false;
+  });
+  if (needsPlanning.length === 0) return;
+
+  // Virtueller, hochgerechneter Punktestand je Mitglied in diesem Monat (auf
+  // Basis tatsächlich erzielter Punkte) - wird beim Verteilen laufend angepasst.
   const virtualEarned = {};
   state.members.forEach((m) => {
     virtualEarned[m.id] = pointsEarnedInRange(m.id, monthStart, now);
   });
   let virtualTotal = Object.values(virtualEarned).reduce((a, b) => a + b, 0);
 
-  // Jede rotierende Aufgabe wird JEDE Woche zugeteilt, unabhängig vom genauen
-  // Fälligkeitsdatum - der Zyklus bestimmt nur noch Dringlichkeit/Überfälligkeit,
-  // nicht mehr, ob diese Woche überhaupt jemand eingeplant wird.
-  const rotatingTasks = state.tasks.filter((t) => t.rotation_enabled);
   // Größte Punktwerte zuerst verteilen - die haben den größten Einfluss auf die Fairness.
-  rotatingTasks.sort((a, b) => b.points - a.points);
+  needsPlanning.sort((a, b) => b.points - a.points);
 
-  rotatingTasks.forEach((t) => {
+  const updates = [];
+  needsPlanning.forEach((t) => {
     const fullPool = t.assigned_member_ids && t.assigned_member_ids.length
       ? t.assigned_member_ids.filter((id) => state.members.some((m) => m.id === id))
       : state.members.map((m) => m.id);
@@ -446,19 +462,27 @@ function computeWeekPlan() {
     });
 
     if (best) {
-      plan[t.id] = best;
       virtualEarned[best] = (virtualEarned[best] || 0) + t.points;
       virtualTotal += t.points;
+      // Direkt am Task-Objekt im State mutieren, damit die Anzeige sofort passt,
+      // ohne auf einen erneuten loadData()-Roundtrip warten zu müssen.
+      t.rotation_assignee_id = best;
+      t.rotation_week_start = weekStartStr;
+      updates.push(
+        sb.from("tasks").update({ rotation_assignee_id: best, rotation_week_start: weekStartStr }).eq("id", t.id)
+      );
     }
   });
 
-  return plan;
+  if (updates.length > 0) {
+    await Promise.all(updates);
+  }
 }
 
 // Anzeige-Text für die Zuständigkeit einer Aufgabe (Karte + Detailansicht).
 function assigneeLine(task) {
   if (task.rotation_enabled) {
-    const assignedId = state.weekPlan[task.id];
+    const assignedId = task.rotation_assignee_id;
     return assignedId ? "🔁 Diese Woche: " + memberName(assignedId) : "🔁 Rotierend";
   }
   const assignedNames = task.assigned_member_ids && task.assigned_member_ids.length
@@ -495,19 +519,25 @@ function renderHomeTaskList() {
   const el = document.getElementById("taskList");
   el.innerHTML = "";
   let tasks = state.tasks;
+
   if (state.homeFilter !== "all") {
+    const weekEnd = getWeekEnd(getWeekStart(new Date()));
     tasks = tasks.filter((t) => {
-      if (t.rotation_enabled) {
-        // Rotierende Aufgaben tauchen in der persönlichen Ansicht nur auf,
-        // wenn man diese Woche tatsächlich dafür eingeplant ist.
-        return state.weekPlan[t.id] === state.homeFilter;
-      }
-      return !t.assigned_member_ids || t.assigned_member_ids.length === 0 || t.assigned_member_ids.includes(state.homeFilter);
+      const isMine = t.rotation_enabled
+        ? t.rotation_assignee_id === state.homeFilter
+        : (!t.assigned_member_ids || t.assigned_member_ids.length === 0 || t.assigned_member_ids.includes(state.homeFilter));
+      if (!isMine) return false;
+      // Persönliche Ansicht zeigt nur, was diese Woche dran bzw. überfällig ist -
+      // damit man sieht, wenn man für diese Woche fertig ist.
+      return taskUrgency(t).dueDate < weekEnd;
     });
   }
+
   tasks = sortByUrgency(tasks);
   if (tasks.length === 0) {
-    el.innerHTML = '<p class="empty-state">Keine Aufgaben. Füge welche unter „Aktivitäten“ hinzu.</p>';
+    el.innerHTML = state.homeFilter === "all"
+      ? '<p class="empty-state">Keine Aufgaben. Füge welche unter „Aktivitäten“ hinzu.</p>'
+      : '<p class="empty-state">🎉 Alle Aufgaben für diese Woche erledigt!</p>';
     return;
   }
   tasks.forEach((t) => el.appendChild(buildTaskCard(t)));
@@ -684,7 +714,7 @@ document.getElementById("btnSaveTask").onclick = async () => {
   }
   closeTaskModal();
   await loadData();
-  renderAll();
+  await renderAll();
   showToast("Gespeichert ✓");
 };
 
@@ -696,7 +726,7 @@ document.getElementById("btnDeleteTask").onclick = async () => {
   closeTaskModal();
   document.getElementById("detailModal").classList.remove("show");
   await loadData();
-  renderAll();
+  await renderAll();
 };
 
 // ---------------- DETAIL MODAL ----------------
@@ -769,7 +799,7 @@ document.getElementById("btnCompleteTask").onclick = async () => {
   document.getElementById("detailModal").classList.remove("show");
   await loadData();
   if (state.me) state.me = state.members.find((m) => m.id === state.me.id) || state.me;
-  renderAll();
+  await renderAll();
   playCelebration();
   showToast(`✓ Erledigt! +${task.points} Punkte für ${memberName(detailDoneBy)}`);
 };
@@ -863,7 +893,7 @@ function renderSettingsMembers() {
         showToast("⚠️ Speichern fehlgeschlagen: " + error.message);
       }
       await loadData();
-      renderAll();
+      await renderAll();
     };
   });
 
@@ -872,7 +902,7 @@ function renderSettingsMembers() {
       if (!confirm("Dieses Mitglied wirklich entfernen?")) return;
       await sb.from("members").delete().eq("id", btn.dataset.id);
       await loadData();
-      renderAll();
+      await renderAll();
     };
   });
 }
@@ -900,7 +930,7 @@ async function evenlySplitQuotas() {
     showToast("Gleichmäßig verteilt ✓");
   }
   await loadData();
-  renderAll();
+  await renderAll();
 }
 
 document.getElementById("btnEvenSplit").onclick = evenlySplitQuotas;
@@ -912,7 +942,7 @@ document.getElementById("btnLeaveWg").onclick = () => {
   localStorage.removeItem(LS.wgCode);
   localStorage.removeItem(LS.wgName);
   localStorage.removeItem(LS.memberId);
-  state = { wg: null, members: [], tasks: [], completions: [], me: null, homeFilter: "all", weekPlan: {} };
+  state = { wg: null, members: [], tasks: [], completions: [], me: null, homeFilter: "all" };
   document.getElementById("newWgName").value = "";
   document.getElementById("joinCode").value = "";
   showScreen("onboarding");
@@ -926,14 +956,14 @@ document.getElementById("btnSettingsAddMember").onclick = async () => {
   if (error) return showToast("Fehler: " + error.message);
   input.value = "";
   await loadData();
-  renderAll();
+  await renderAll();
 };
 
 document.getElementById("btnResetPoints").onclick = async () => {
   if (!confirm("Wirklich alle Punktestände auf 0 setzen?")) return;
   await sb.from("members").update({ points: 0 }).eq("wg_id", state.wg.id);
   await loadData();
-  renderAll();
+  await renderAll();
 };
 
 // ---------------- ONBOARDING EVENTS ----------------
@@ -1011,8 +1041,9 @@ function showToast(msg) {
 }
 
 // refresh urgency bars periodically without full reload
-setInterval(() => {
+setInterval(async () => {
   if (document.getElementById("app").classList.contains("show")) {
+    await ensureWeekPlan(); // No-op außer genau am Wochenwechsel, falls der Tab offen bleibt
     renderHomeTaskList();
     renderTasksView();
   }
