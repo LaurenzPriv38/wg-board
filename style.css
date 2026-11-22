@@ -199,6 +199,11 @@ input[type="text"]:focus, textarea:focus { outline: none; border-color: var(--pr
 
 /* ---------- Task list ---------- */
 .task-list { display: flex; flex-direction: column; gap: 10px; }
+.week-section-header {
+  font-size: 12px; font-weight: 700; color: var(--text-muted); text-transform: uppercase;
+  letter-spacing: .03em; margin: 10px 2px 2px; padding-top: 6px;
+}
+.week-section-header:first-child { margin-top: 0; padding-top: 0; }
 .task-card {
   background: var(--surface); border-radius: 14px; padding: 13px 15px;
   box-shadow: var(--shadow); cursor: pointer; transition: order .4s, transform .08s;
