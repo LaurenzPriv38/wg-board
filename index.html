@@ -158,9 +158,12 @@
       <button type="button" class="mode-btn" data-mode="rotating">Rotierend</button>
     </div>
 
-    <label class="field-label">Zuständig</label>
-    <div id="assigneeChips" class="assignee-chips"></div>
-    <p class="hint" id="assigneeHint">Niemand ausgewählt = Aufgabe gilt für alle.</p>
+    <div id="fixedAssigneeSection">
+      <label class="field-label">Zuständig</label>
+      <div id="assigneeChips" class="assignee-chips"></div>
+      <p class="hint">Niemand ausgewählt = Aufgabe gilt für alle.</p>
+    </div>
+    <p class="hint hidden" id="rotatingHint">Rotiert automatisch wöchentlich unter allen WG-Mitgliedern – mit dem Ziel, dass am Monatsende alle möglichst nah an ihrem Soll-Anteil liegen. Dieselbe Person macht eine Aufgabe höchstens 2 Wochen in Folge.</p>
 
     <div class="modal-actions">
       <button id="btnDeleteTask" class="btn-danger small hidden">Löschen</button>
