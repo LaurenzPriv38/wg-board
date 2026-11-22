@@ -46,15 +46,24 @@ create table if not exists completions (
   completed_at timestamptz default now()
 );
 
--- Wochen-Zuteilung für rotierende Aufgaben: wer ist in welcher Kalenderwoche
--- (Montag als week_start) für eine Aufgabe zuständig. Einmal gesetzt, bleibt
--- der Eintrag für diese Woche bestehen (wird von der App nie überschrieben).
+-- Vorkommnis-Zuteilung für rotierende Aufgaben: wer ist für welches konkrete
+-- Vorkommnis-Datum (occurrence_date) einer Aufgabe zuständig. Eine Aufgabe
+-- kann mehrmals pro Woche fällig sein (z.B. alle 2 Tage) - deshalb pro
+-- konkretem Datum ein eigener Eintrag, nicht nur einer pro Kalenderwoche.
+-- week_start (Montag der Woche, in die occurrence_date fällt) ist nur zur
+-- einfacheren Gruppierung/Filterung mitgespeichert. completed_at wird
+-- gesetzt, sobald genau dieses Vorkommnis erledigt wurde (unabhängig von
+-- anderen Vorkommnissen derselben Aufgabe in derselben Woche). Einmal
+-- gesetzte Zuteilungen werden nie wieder überschrieben (wird von der App nie
+-- überschrieben, außer über "Neu mischen" ab der jeweils kommenden Woche).
 create table if not exists task_assignments (
   task_id uuid references tasks(id) on delete cascade not null,
+  occurrence_date date not null,
   week_start date not null,
   member_id uuid references members(id) on delete set null,
+  completed_at timestamptz,
   assigned_at timestamptz default now(),
-  primary key (task_id, week_start)
+  primary key (task_id, occurrence_date)
 );
 
 -- Teams: Gruppierung von Mitgliedern mit eigenem Soll-Anteil pro Team.
@@ -158,3 +167,24 @@ alter publication supabase_realtime add table team_members;
 -- create policy "public_all_team_members" on team_members for all using (true) with check (true);
 -- alter publication supabase_realtime add table teams;
 -- alter publication supabase_realtime add table team_members;
+
+-- ====================================================================
+-- WICHTIG - BREAKING CHANGE: "task_assignments" wurde umgebaut (ein Eintrag
+-- pro konkretem Vorkommnis-Datum statt nur einer pro Kalenderwoche, damit
+-- mehrmals pro Woche fällige Aufgaben als mehrere To-Do-Einträge auftauchen).
+-- Falls die Tabelle schon in der ALTEN Form (PK auf task_id+week_start)
+-- existiert, MUSS sie neu angelegt werden - die alten Zeilen lassen sich
+-- nicht sinnvoll übernehmen. Einmalig ausführen:
+-- drop table if exists task_assignments cascade;
+-- create table if not exists task_assignments (
+--   task_id uuid references tasks(id) on delete cascade not null,
+--   occurrence_date date not null,
+--   week_start date not null,
+--   member_id uuid references members(id) on delete set null,
+--   completed_at timestamptz,
+--   assigned_at timestamptz default now(),
+--   primary key (task_id, occurrence_date)
+-- );
+-- alter table task_assignments enable row level security;
+-- create policy "public_all_task_assignments" on task_assignments for all using (true) with check (true);
+-- alter publication supabase_realtime add table task_assignments;
