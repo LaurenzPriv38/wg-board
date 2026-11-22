@@ -634,16 +634,18 @@ function renderHomeTaskList() {
     tasks = tasks.filter((t) => {
       if (t.rotation_enabled) {
         // Zeigt diese Woche UND bereits vorab geplante künftige Wochen (über
-        // den "Nächste Woche planen"-Button) - sobald eine Zuteilung existiert.
-        // Für die LAUFENDE Woche zusätzlich prüfen, ob die Aufgabe tatsächlich
-        // noch fällig/überfällig ist - sonst bleibt eine gerade erledigte
-        // Aufgabe fälschlich bis Wochenende in der persönlichen Liste stehen.
-        // Eine schon für die KOMMENDE Woche vorgeplante Zuteilung wird dagegen
-        // immer angezeigt (die ist per Definition noch nicht fällig).
+        // den "Nächste Woche planen"-Button) - aber NUR, solange die Aufgabe
+        // laut aktuellem Fälligkeitsdatum auch wirklich in genau das
+        // Wochenfenster dieser Zuteilung fällt. Das gilt für JEDE Zuteilung,
+        // nicht nur die laufende Woche - sonst bleibt z.B. eine bereits für
+        // nächste Woche vorgeplante Aufgabe sichtbar, obwohl sie durch
+        // wiederholtes Erledigen längst wieder weiter nach hinten gerutscht
+        // ist. Eine überfällige Aufgabe (dueDate in der Vergangenheit) zählt
+        // dabei immer als "noch offen", egal für welche Woche.
         return state.taskAssignments.some((a) => {
           if (a.task_id !== t.id || a.member_id !== state.homeFilter || a.week_start < currentWeekStartStr) return false;
-          if (a.week_start === currentWeekStartStr) return taskUrgency(t).dueDate < weekEnd;
-          return true;
+          const assignmentWeekEnd = getWeekEnd(new Date(a.week_start + "T00:00:00"));
+          return taskUrgency(t).dueDate < assignmentWeekEnd;
         });
       }
       const isMine = !t.assigned_member_ids || t.assigned_member_ids.length === 0 || t.assigned_member_ids.includes(state.homeFilter);
