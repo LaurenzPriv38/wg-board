@@ -33,8 +33,6 @@ create table if not exists tasks (
   cycle_days int not null default 7, -- Wiederholungszyklus in Tagen
   assigned_member_ids uuid[] default '{}', -- leer = für alle / ganzer Rotations-Pool
   rotation_enabled boolean not null default false, -- true = Aufgabe rotiert automatisch statt fest zugewiesen zu sein
-  rotation_assignee_id uuid references members(id) on delete set null, -- wer diese Kalenderwoche für die Rotation zuständig ist
-  rotation_week_start date, -- Montag der Woche, für die rotation_assignee_id gilt
   last_done_at timestamptz default now(),
   created_at timestamptz default now()
 );
@@ -48,11 +46,23 @@ create table if not exists completions (
   completed_at timestamptz default now()
 );
 
+-- Wochen-Zuteilung für rotierende Aufgaben: wer ist in welcher Kalenderwoche
+-- (Montag als week_start) für eine Aufgabe zuständig. Einmal gesetzt, bleibt
+-- der Eintrag für diese Woche bestehen (wird von der App nie überschrieben).
+create table if not exists task_assignments (
+  task_id uuid references tasks(id) on delete cascade not null,
+  week_start date not null,
+  member_id uuid references members(id) on delete set null,
+  assigned_at timestamptz default now(),
+  primary key (task_id, week_start)
+);
+
 -- Row Level Security aktivieren
 alter table wgs enable row level security;
 alter table members enable row level security;
 alter table tasks enable row level security;
 alter table completions enable row level security;
+alter table task_assignments enable row level security;
 
 -- Diese App hat bewusst kein Login ("Vertrauens-App"). Jeder, der
 -- den anon-key + die WG-Code kennt, darf lesen/schreiben. Das ist für eine
@@ -61,11 +71,13 @@ create policy "public_all_wgs" on wgs for all using (true) with check (true);
 create policy "public_all_members" on members for all using (true) with check (true);
 create policy "public_all_tasks" on tasks for all using (true) with check (true);
 create policy "public_all_completions" on completions for all using (true) with check (true);
+create policy "public_all_task_assignments" on task_assignments for all using (true) with check (true);
 
 -- Realtime aktivieren, damit alle Geräte sofort Änderungen sehen
 alter publication supabase_realtime add table members;
 alter publication supabase_realtime add table tasks;
 alter publication supabase_realtime add table completions;
+alter publication supabase_realtime add table task_assignments;
 
 -- ====================================================================
 -- MIGRATION für bereits bestehende Datenbanken (nur EINMAL ausführen,
@@ -79,7 +91,17 @@ alter publication supabase_realtime add table completions;
 -- "tasks" schon vorher existierte):
 -- alter table tasks add column if not exists rotation_enabled boolean not null default false;
 
--- Neu, damit die Wochenzuteilung stabil bleibt (nicht mehr bei jeder Erledigung
--- neu gemischt wird), einmalig ausführen:
--- alter table tasks add column if not exists rotation_assignee_id uuid references members(id) on delete set null;
--- alter table tasks add column if not exists rotation_week_start date;
+-- Neu: eigene Tabelle für die Wochen-Zuteilung (ersetzt die ursprünglich
+-- geplanten Spalten rotation_assignee_id/rotation_week_start direkt an der
+-- Aufgabe - falls du die testweise schon angelegt hattest, werden sie von
+-- der App nicht mehr benutzt und können bleiben oder gelöscht werden):
+-- create table if not exists task_assignments (
+--   task_id uuid references tasks(id) on delete cascade not null,
+--   week_start date not null,
+--   member_id uuid references members(id) on delete set null,
+--   assigned_at timestamptz default now(),
+--   primary key (task_id, week_start)
+-- );
+-- alter table task_assignments enable row level security;
+-- create policy "public_all_task_assignments" on task_assignments for all using (true) with check (true);
+-- alter publication supabase_realtime add table task_assignments;
