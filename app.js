@@ -635,9 +635,16 @@ function renderHomeTaskList() {
       if (t.rotation_enabled) {
         // Zeigt diese Woche UND bereits vorab geplante künftige Wochen (über
         // den "Nächste Woche planen"-Button) - sobald eine Zuteilung existiert.
-        return state.taskAssignments.some(
-          (a) => a.task_id === t.id && a.member_id === state.homeFilter && a.week_start >= currentWeekStartStr
-        );
+        // Für die LAUFENDE Woche zusätzlich prüfen, ob die Aufgabe tatsächlich
+        // noch fällig/überfällig ist - sonst bleibt eine gerade erledigte
+        // Aufgabe fälschlich bis Wochenende in der persönlichen Liste stehen.
+        // Eine schon für die KOMMENDE Woche vorgeplante Zuteilung wird dagegen
+        // immer angezeigt (die ist per Definition noch nicht fällig).
+        return state.taskAssignments.some((a) => {
+          if (a.task_id !== t.id || a.member_id !== state.homeFilter || a.week_start < currentWeekStartStr) return false;
+          if (a.week_start === currentWeekStartStr) return taskUrgency(t).dueDate < weekEnd;
+          return true;
+        });
       }
       const isMine = !t.assigned_member_ids || t.assigned_member_ids.length === 0 || t.assigned_member_ids.includes(state.homeFilter);
       if (!isMine) return false;
