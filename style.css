@@ -304,6 +304,15 @@ input[type="text"]:focus, textarea:focus { outline: none; border-color: var(--pr
 @keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
 @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 
+.mode-toggle { display: flex; gap: 8px; margin: 4px 0 2px; }
+.mode-btn {
+  flex: 1; background: var(--bg); border: 1.5px solid var(--border); color: var(--text-muted);
+  border-radius: 10px; padding: 9px 10px; font-size: 13px; font-weight: 600; cursor: pointer;
+  transition: all .15s;
+}
+.mode-btn.active { background: var(--primary); border-color: var(--primary); color: #fff; }
+.mode-btn:active { transform: scale(0.97); }
+
 .assignee-chips { display: flex; flex-wrap: wrap; gap: 8px; }
 .assignee-chip {
   border: 1.5px solid var(--border); border-radius: 18px; padding: 7px 14px;
