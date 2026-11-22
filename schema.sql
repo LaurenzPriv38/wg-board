@@ -33,6 +33,8 @@ create table if not exists tasks (
   cycle_days int not null default 7, -- Wiederholungszyklus in Tagen
   assigned_member_ids uuid[] default '{}', -- leer = für alle / ganzer Rotations-Pool
   rotation_enabled boolean not null default false, -- true = Aufgabe rotiert automatisch statt fest zugewiesen zu sein
+  rotation_assignee_id uuid references members(id) on delete set null, -- wer diese Kalenderwoche für die Rotation zuständig ist
+  rotation_week_start date, -- Montag der Woche, für die rotation_assignee_id gilt
   last_done_at timestamptz default now(),
   created_at timestamptz default now()
 );
@@ -76,3 +78,8 @@ alter publication supabase_realtime add table completions;
 -- Neu für die Rotations-Funktion (einmalig ausführen, falls die Tabelle
 -- "tasks" schon vorher existierte):
 -- alter table tasks add column if not exists rotation_enabled boolean not null default false;
+
+-- Neu, damit die Wochenzuteilung stabil bleibt (nicht mehr bei jeder Erledigung
+-- neu gemischt wird), einmalig ausführen:
+-- alter table tasks add column if not exists rotation_assignee_id uuid references members(id) on delete set null;
+-- alter table tasks add column if not exists rotation_week_start date;
