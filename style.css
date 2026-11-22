@@ -224,6 +224,38 @@ input[type="text"]:focus, textarea:focus { outline: none; border-color: var(--pr
 .history-points { font-size: 12px; font-weight: 700; color: var(--ok); background: #e8f9ee; padding: 2px 8px; border-radius: 8px; }
 .history-meta { font-size: 12px; color: var(--text-muted); }
 
+/* ---------- Team-Balkendiagramm (Home) ---------- */
+.team-boards { display: flex; flex-direction: column; gap: 10px; margin-bottom: 16px; }
+.team-board-card {
+  background: var(--surface); border-radius: 14px; padding: 12px 14px; box-shadow: var(--shadow);
+}
+.team-board-title { font-weight: 700; font-size: 13px; color: var(--text-muted); margin-bottom: 8px; }
+.team-board-row { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 4px; }
+.team-board-name { font-weight: 600; font-size: 13px; }
+.team-board-pts { font-size: 12px; color: var(--text-muted); }
+.team-board-pts small { color: var(--text-muted); }
+.bar-track.small { height: 7px; margin-bottom: 10px; }
+.bar-track.small .bar-fill { transition: width .5s; }
+
+/* ---------- Teams (Einstellungen) ---------- */
+.teams-list { display: flex; flex-direction: column; gap: 10px; margin-bottom: 10px; }
+.team-card { background: var(--bg); border: 1.5px solid var(--border); border-radius: 12px; padding: 12px 14px; }
+.team-card-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+.team-card-name { font-weight: 700; font-size: 14px; }
+.team-card-badge { font-size: 12px; font-weight: 700; padding: 2px 9px; border-radius: 8px; }
+.team-card-badge.valid { background: #e8f9ee; color: var(--ok); }
+.team-card-badge.invalid { background: #fdecef; color: var(--danger); }
+.team-card-members { font-size: 12px; color: var(--text-muted); }
+.team-quota-rows { display: flex; flex-direction: column; gap: 8px; margin: 10px 0; }
+.team-quota-row { display: flex; align-items: center; gap: 8px; }
+.team-quota-name { font-weight: 600; font-size: 14px; flex: 1; }
+.quota-number-input {
+  width: 64px; padding: 8px 10px; border-radius: 10px; border: 1.5px solid var(--border);
+  font-size: 14px; text-align: right; background: #fbfbfd; color: var(--text);
+}
+.quota-number-input:focus { outline: none; border-color: var(--primary); }
+.quota-percent-sign { font-size: 13px; color: var(--text-muted); width: 14px; }
+
 /* ---------- Settings ---------- */
 .settings-section { background: var(--surface); border-radius: 14px; padding: 16px; box-shadow: var(--shadow); margin-bottom: 16px; }
 .settings-section h3 { font-size: 14px; color: var(--text-muted); margin-bottom: 12px; }
