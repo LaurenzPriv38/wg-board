@@ -15,6 +15,7 @@ let state = {
   members: [],
   tasks: [],
   completions: [],
+  taskAssignments: [], // { task_id, week_start, member_id } - wer eine rotierende Aufgabe in welcher Woche macht
   me: null,
   homeFilter: "all",
 };
@@ -89,18 +90,19 @@ async function loadData() {
   state.members = membersRes.data || [];
   state.tasks = tasksRes.data || [];
 
-  // Verlauf (completions) hat keine eigene wg_id-Spalte, daher über die
-  // Aufgaben-IDs dieser WG filtern.
+  // Verlauf (completions) und Wochen-Zuteilungen (task_assignments) haben
+  // keine eigene wg_id-Spalte, daher über die Aufgaben-IDs dieser WG filtern.
   const taskIds = state.tasks.map((t) => t.id);
   if (taskIds.length > 0) {
-    const { data: completionsData } = await sb
-      .from("completions")
-      .select("*")
-      .in("task_id", taskIds)
-      .order("completed_at", { ascending: false });
-    state.completions = completionsData || [];
+    const [completionsRes, assignmentsRes] = await Promise.all([
+      sb.from("completions").select("*").in("task_id", taskIds).order("completed_at", { ascending: false }),
+      sb.from("task_assignments").select("*").in("task_id", taskIds),
+    ]);
+    state.completions = completionsRes.data || [];
+    state.taskAssignments = assignmentsRes.data || [];
   } else {
     state.completions = [];
+    state.taskAssignments = [];
   }
 }
 
@@ -208,7 +210,7 @@ async function addMemberOnboard() {
 // ---------------- RENDER: HOME ----------------
 
 async function renderAll() {
-  await ensureWeekPlan();
+  await planWeek(getWeekStart(new Date()));
   renderLeaderboard();
   renderFilterRow();
   renderHomeTaskList();
@@ -395,27 +397,32 @@ function isoDateOnly(d) {
   return `${y}-${m}-${day}`;
 }
 
-// Legt fest, wer für jede rotierende Aufgabe diese Kalenderwoche zuständig ist -
-// und zwar NUR EINMAL pro Woche. Das Ergebnis wird direkt an der Aufgabe
-// gespeichert (rotation_assignee_id/rotation_week_start) und bleibt für den
-// Rest der Woche unverändert, egal wie viele Aufgaben zwischendurch erledigt
-// werden. Ohne diese Sperre würde jede Erledigung die Fairness-Rechnung neu
-// mischen und Aufgaben mitten in der Woche von einer Person zur anderen
-// "springen" lassen - genau das soll das hier verhindern.
-async function ensureWeekPlan() {
+// Zuteilung für eine bestimmte Kalenderwoche nachschlagen.
+function assignmentFor(taskId, weekStartStr) {
+  const row = state.taskAssignments.find((a) => a.task_id === taskId && a.week_start === weekStartStr);
+  return row ? row.member_id : null;
+}
+
+// Plant eine bestimmte Kalenderwoche (weekStart = Montag dieser Woche) für alle
+// rotierenden Aufgaben, die in dieser Woche auch tatsächlich fällig/überfällig
+// sind - und nur für die, die für diese Woche noch keine Zuteilung haben.
+// Einmal gesetzte Zuteilungen werden nie wieder überschrieben (stabil, egal
+// wie viel in der Zwischenzeit erledigt wird). Eine Aufgabe, die gerade erst
+// erledigt wurde und erst in 2 Wochen wieder fällig ist, wird dementsprechend
+// NICHT für die kommende Woche eingeplant - sie taucht erst wieder auf, wenn
+// ihre Fälligkeit tatsächlich in eine Woche fällt.
+async function planWeek(weekStart) {
   if (state.members.length === 0) return;
 
-  const now = new Date();
-  const weekStart = getWeekStart(now);
   const weekStartStr = isoDateOnly(weekStart);
+  const weekEnd = getWeekEnd(weekStart);
+  const now = new Date();
   const monthStart = getMonthStart(now);
 
-  const rotatingTasks = state.tasks.filter((t) => t.rotation_enabled);
-  const needsPlanning = rotatingTasks.filter((t) => {
-    if (t.rotation_week_start !== weekStartStr) return true; // neue Woche
-    if (!t.rotation_assignee_id) return true;
-    if (!state.members.some((m) => m.id === t.rotation_assignee_id)) return true; // Mitglied existiert nicht mehr
-    return false;
+  const needsPlanning = state.tasks.filter((t) => {
+    if (!t.rotation_enabled) return false;
+    if (assignmentFor(t.id, weekStartStr)) return false; // für diese Woche schon geplant
+    return taskUrgency(t).dueDate < weekEnd; // nur einplanen, wenn in dieser Woche wirklich fällig
   });
   if (needsPlanning.length === 0) return;
 
@@ -430,7 +437,7 @@ async function ensureWeekPlan() {
   // Größte Punktwerte zuerst verteilen - die haben den größten Einfluss auf die Fairness.
   needsPlanning.sort((a, b) => b.points - a.points);
 
-  const updates = [];
+  const inserts = [];
   needsPlanning.forEach((t) => {
     const fullPool = t.assigned_member_ids && t.assigned_member_ids.length
       ? t.assigned_member_ids.filter((id) => state.members.some((m) => m.id === id))
@@ -464,25 +471,23 @@ async function ensureWeekPlan() {
     if (best) {
       virtualEarned[best] = (virtualEarned[best] || 0) + t.points;
       virtualTotal += t.points;
-      // Direkt am Task-Objekt im State mutieren, damit die Anzeige sofort passt,
-      // ohne auf einen erneuten loadData()-Roundtrip warten zu müssen.
-      t.rotation_assignee_id = best;
-      t.rotation_week_start = weekStartStr;
-      updates.push(
-        sb.from("tasks").update({ rotation_assignee_id: best, rotation_week_start: weekStartStr }).eq("id", t.id)
-      );
+      const row = { task_id: t.id, week_start: weekStartStr, member_id: best };
+      // Direkt im State ergänzen, damit die Anzeige sofort passt, ohne auf
+      // einen erneuten loadData()-Roundtrip warten zu müssen.
+      state.taskAssignments.push(row);
+      inserts.push(row);
     }
   });
 
-  if (updates.length > 0) {
-    await Promise.all(updates);
+  if (inserts.length > 0) {
+    await sb.from("task_assignments").upsert(inserts, { onConflict: "task_id,week_start" });
   }
 }
 
 // Anzeige-Text für die Zuständigkeit einer Aufgabe (Karte + Detailansicht).
 function assigneeLine(task) {
   if (task.rotation_enabled) {
-    const assignedId = task.rotation_assignee_id;
+    const assignedId = assignmentFor(task.id, isoDateOnly(getWeekStart(new Date())));
     return assignedId ? "🔁 Diese Woche: " + memberName(assignedId) : "🔁 Rotierend";
   }
   const assignedNames = task.assigned_member_ids && task.assigned_member_ids.length
@@ -522,10 +527,16 @@ function renderHomeTaskList() {
 
   if (state.homeFilter !== "all") {
     const weekEnd = getWeekEnd(getWeekStart(new Date()));
+    const currentWeekStartStr = isoDateOnly(getWeekStart(new Date()));
     tasks = tasks.filter((t) => {
-      const isMine = t.rotation_enabled
-        ? t.rotation_assignee_id === state.homeFilter
-        : (!t.assigned_member_ids || t.assigned_member_ids.length === 0 || t.assigned_member_ids.includes(state.homeFilter));
+      if (t.rotation_enabled) {
+        // Zeigt diese Woche UND bereits vorab geplante künftige Wochen (über
+        // den "Nächste Woche planen"-Button) - sobald eine Zuteilung existiert.
+        return state.taskAssignments.some(
+          (a) => a.task_id === t.id && a.member_id === state.homeFilter && a.week_start >= currentWeekStartStr
+        );
+      }
+      const isMine = !t.assigned_member_ids || t.assigned_member_ids.length === 0 || t.assigned_member_ids.includes(state.homeFilter);
       if (!isMine) return false;
       // Persönliche Ansicht zeigt nur, was diese Woche dran bzw. überfällig ist -
       // damit man sieht, wenn man für diese Woche fertig ist.
@@ -935,6 +946,14 @@ async function evenlySplitQuotas() {
 
 document.getElementById("btnEvenSplit").onclick = evenlySplitQuotas;
 
+document.getElementById("btnPlanNextWeek").onclick = async () => {
+  const nextWeekStart = getWeekEnd(getWeekStart(new Date())); // = Montag der kommenden Woche
+  await planWeek(nextWeekStart);
+  await loadData();
+  await renderAll();
+  showToast("Nächste Woche eingeplant ✓");
+};
+
 document.getElementById("btnLeaveWg").onclick = () => {
   if (!confirm("WG wirklich verlassen? Du kannst jederzeit mit dem Beitrittscode wieder beitreten.")) return;
   if (sb && sb.removeAllChannels) sb.removeAllChannels();
@@ -942,7 +961,7 @@ document.getElementById("btnLeaveWg").onclick = () => {
   localStorage.removeItem(LS.wgCode);
   localStorage.removeItem(LS.wgName);
   localStorage.removeItem(LS.memberId);
-  state = { wg: null, members: [], tasks: [], completions: [], me: null, homeFilter: "all" };
+  state = { wg: null, members: [], tasks: [], completions: [], taskAssignments: [], me: null, homeFilter: "all" };
   document.getElementById("newWgName").value = "";
   document.getElementById("joinCode").value = "";
   showScreen("onboarding");
@@ -1043,7 +1062,7 @@ function showToast(msg) {
 // refresh urgency bars periodically without full reload
 setInterval(async () => {
   if (document.getElementById("app").classList.contains("show")) {
-    await ensureWeekPlan(); // No-op außer genau am Wochenwechsel, falls der Tab offen bleibt
+    await planWeek(getWeekStart(new Date())); // No-op außer genau am Wochenwechsel, falls der Tab offen bleibt
     renderHomeTaskList();
     renderTasksView();
   }
