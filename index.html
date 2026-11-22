@@ -63,17 +63,21 @@
 
   <!-- HOME VIEW -->
   <main id="view-home" class="view active">
-    <section class="leaderboard" id="leaderboard"></section>
-
+    <div class="home-block-header">🏆 Team-Wertung</div>
     <section class="team-boards" id="teamBoards"></section>
 
-    <button id="btnReshuffle" class="btn-secondary small" style="margin-bottom:14px;">🔀 Neu mischen (ab nächster Woche)</button>
-
+    <div class="home-block-header">📅 Aufgaben dieser Woche</div>
     <div class="filter-row" id="filterRow">
       <button class="chip active" data-filter="all">Alle</button>
     </div>
+    <section class="task-list" id="taskListCurrent"></section>
 
-    <section class="task-list" id="taskList"></section>
+    <div class="home-block-header">📊 Gesamtwertung</div>
+    <section class="leaderboard" id="leaderboard"></section>
+
+    <div class="home-block-header">🔮 Zukünftige Aufgaben</div>
+    <button id="btnReshuffle" class="btn-secondary small" style="margin-bottom:14px;">🔀 Neu mischen (ab nächster Woche)</button>
+    <section class="task-list" id="taskListFuture"></section>
   </main>
 
   <!-- TASKS / AKTIVITÄTEN VIEW -->
@@ -81,6 +85,9 @@
     <div class="view-header">
       <h2>Aktivitäten</h2>
       <button id="btnAddTask" class="fab-inline">＋ Neue Aufgabe</button>
+    </div>
+    <div class="filter-row" id="taskFilterRow">
+      <button class="chip active" data-filter="all">Alle</button>
     </div>
     <section class="task-list" id="allTaskList"></section>
   </main>
