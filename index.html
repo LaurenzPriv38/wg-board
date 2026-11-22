@@ -152,9 +152,15 @@
     <label class="field-label">Punktewert: <span id="pointsLabel" class="label-value">20</span></label>
     <input id="pointsSlider" type="range" min="5" max="100" step="5" value="20" class="slider slider-points">
 
+    <label class="field-label">Zuständigkeit</label>
+    <div class="mode-toggle">
+      <button type="button" class="mode-btn active" data-mode="fixed">Feste Zuweisung</button>
+      <button type="button" class="mode-btn" data-mode="rotating">Rotierend</button>
+    </div>
+
     <label class="field-label">Zuständig</label>
     <div id="assigneeChips" class="assignee-chips"></div>
-    <p class="hint">Niemand ausgewählt = Aufgabe gilt für alle.</p>
+    <p class="hint" id="assigneeHint">Niemand ausgewählt = Aufgabe gilt für alle.</p>
 
     <div class="modal-actions">
       <button id="btnDeleteTask" class="btn-danger small hidden">Löschen</button>
