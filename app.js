@@ -1255,15 +1255,45 @@ document.getElementById("btnSettingsAddMember").onclick = async () => {
   await renderAll();
 };
 
-document.getElementById("btnResetPoints").onclick = async () => {
-  if (!confirm("Wirklich alle Punktestände auf 0 setzen?")) return;
+document.getElementById("btnResetAll").onclick = async () => {
+  if (
+    !confirm(
+      "Wirklich ALLES zurücksetzen? Das setzt alle Punktestände auf 0, löscht den kompletten Verlauf und die aktuelle/vorgeplante Wochenzuteilung unwiderruflich."
+    )
+  )
+    return;
+
+  const taskIds = state.tasks.map((t) => t.id);
+
   await sb.from("members").update({ points: 0 }).eq("wg_id", state.wg.id);
+
   const teamIds = state.teams.map((t) => t.id);
   if (teamIds.length > 0) {
     await sb.from("team_members").update({ points: 0 }).in("team_id", teamIds);
   }
+
+  if (taskIds.length > 0) {
+    // Verlauf und Wochenzuteilungen komplett löschen, damit die Planung
+    // wirklich bei null anfängt (sonst "erinnert" sich die Fairness-Logik
+    // bzw. die 2-Wochen-Rotationsregel noch an Längst-Zurückgesetztes).
+    await sb.from("completions").delete().in("task_id", taskIds);
+    await sb.from("task_assignments").delete().in("task_id", taskIds);
+
+    // last_done_at je Aufgabe so weit zurückdatieren, dass sie sofort wieder
+    // fällig ist - sonst bliebe jede Aufgabe trotz gelöschter Planung noch
+    // tagelang "nicht fällig" (weil last_done_at z.B. erst von vor 5 Minuten
+    // stammt) und "Nächste Woche planen" würde weiterhin ins Leere laufen.
+    const now = Date.now();
+    const updates = state.tasks.map((t) => {
+      const freshDueDate = new Date(now - t.cycle_days * 86400000 - 60000).toISOString();
+      return sb.from("tasks").update({ last_done_at: freshDueDate }).eq("id", t.id);
+    });
+    await Promise.all(updates);
+  }
+
   await loadData();
   await renderAll();
+  showToast("Alles zurückgesetzt ✓");
 };
 
 // ---------------- ONBOARDING EVENTS ----------------
