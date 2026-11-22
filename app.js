@@ -19,8 +19,37 @@ let state = {
   teams: [], // { id, wg_id, name }
   teamMembers: [], // { team_id, member_id, quota_percent, points } - Mitgliedschaft + Soll-Anteil + Team-Punkte
   me: null,
-  homeFilter: "all",
+  homeFilter: "all", // "all" oder eine member_id - steuert Home: "Diese Woche" + "Zukünftige Aufgaben"
+  taskViewFilter: "all", // "all" oder eine team_id - steuert die Team-Gliederung in Aktivitäten
 };
+
+// Feste Farbpalette für Teams, der Reihe nach (nach created_at) zugewiesen.
+const TEAM_COLORS = ["#6c5ce7", "#00b894", "#e17055", "#0984e3", "#fdcb6e", "#e84393", "#00cec9", "#d63031"];
+
+function teamColorByIndex(idx) {
+  return TEAM_COLORS[idx % TEAM_COLORS.length];
+}
+
+function teamColorById(teamId) {
+  const idx = state.teams.findIndex((t) => t.id === teamId);
+  return idx >= 0 ? teamColorByIndex(idx) : null;
+}
+
+// Die Farbe einer Aufgabe = die Farbe ihres (ersten) Teams, oder null wenn die
+// Aufgabe auf kein Team eingeschränkt ist (teamübergreifend / feste Zuweisung).
+function colorForTask(task) {
+  if (!task.team_ids || task.team_ids.length === 0) return null;
+  return teamColorById(task.team_ids[0]);
+}
+
+function teamNamesForTask(task) {
+  if (!task.team_ids || task.team_ids.length === 0) return null;
+  const names = task.team_ids.map((id) => {
+    const t = state.teams.find((x) => x.id === id);
+    return t ? t.name : null;
+  }).filter(Boolean);
+  return names.length ? names.join(", ") : null;
+}
 
 // ---------------- INIT ----------------
 
@@ -228,6 +257,7 @@ async function renderAll() {
   renderTeamBoards();
   renderFilterRow();
   renderHomeTaskList();
+  renderTaskFilterRow();
   renderTasksView();
   renderHistory();
   renderSettingsMembers();
@@ -239,10 +269,28 @@ async function renderAll() {
 
 // Kombinierter Soll-Anteil einer Person: einfacher Durchschnitt ihrer
 // Quoten über alle Teams, in denen sie Mitglied ist. null = in keinem Team.
-function combinedQuotaForMember(memberId) {
+function rawCombinedQuota(memberId) {
+  // Durchschnittlicher Quota-Anteil dieser Person über alle Teams, in denen sie Mitglied ist.
+  // Noch NICHT über alle WG-Mitglieder normalisiert (Summe kann z.B. >100 sein, wenn
+  // jemand in mehreren Teams mit je hohem Anteil ist, oder <100, wenn es "team-lose" Personen gibt).
   const rows = state.teamMembers.filter((tm) => tm.member_id === memberId);
   if (rows.length === 0) return null;
   return rows.reduce((s, r) => s + Number(r.quota_percent), 0) / rows.length;
+}
+
+function combinedQuotaForMember(memberId) {
+  // Soll-Anteil für die Home-Anzeige: rawCombinedQuota, aber über ALLE WG-Mitglieder normalisiert,
+  // damit die angezeigten Soll-Prozente in Summe immer 100% ergeben. Eine Person, die nur in einem
+  // kleinen Team mit niedrigem Anteil ist, bekommt dadurch automatisch einen kleineren Soll-Anteil
+  // als jemand, der in mehreren Teams mit hohem Anteil vertreten ist.
+  const raw = rawCombinedQuota(memberId);
+  if (raw === null) return null;
+  const total = state.members.reduce((sum, m) => {
+    const r = rawCombinedQuota(m.id);
+    return sum + (r !== null ? r : 0);
+  }, 0);
+  if (total <= 0) return null;
+  return (raw / total) * 100;
 }
 
 function renderLeaderboard() {
@@ -296,12 +344,14 @@ function renderTeamBoards() {
   const el = document.getElementById("teamBoards");
   if (!el) return;
   el.innerHTML = "";
-  state.teams.forEach((team) => {
+  state.teams.forEach((team, idx) => {
     const rows = state.teamMembers.filter((tm) => tm.team_id === team.id);
     if (rows.length === 0) return;
+    const color = teamColorByIndex(idx);
     const maxPts = Math.max(1, ...rows.map((r) => Number(r.points)));
     const card = document.createElement("div");
     card.className = "team-board-card";
+    card.style.borderLeft = `4px solid ${color}`;
     const rowsHtml = rows
       .map((r) => {
         const pct = Math.round((Number(r.points) / maxPts) * 100);
@@ -310,11 +360,11 @@ function renderTeamBoards() {
             <span class="team-board-name">${escapeHtml(memberName(r.member_id))}</span>
             <span class="team-board-pts">${r.points} P. <small>(Soll ${Math.round(Number(r.quota_percent))}%)</small></span>
           </div>
-          <div class="bar-track small"><div class="bar-fill" style="width:${pct}%"></div></div>
+          <div class="bar-track small"><div class="bar-fill" style="width:${pct}%; background:${color}"></div></div>
         `;
       })
       .join("");
-    card.innerHTML = `<div class="team-board-title">${escapeHtml(team.name)}</div>${rowsHtml}`;
+    card.innerHTML = `<div class="team-board-title" style="color:${color}">${escapeHtml(team.name)}</div>${rowsHtml}`;
     el.appendChild(card);
   });
 }
@@ -334,6 +384,29 @@ function renderFilterRow() {
       state.homeFilter = chip.dataset.filter;
       renderFilterRow();
       renderHomeTaskList();
+    };
+  });
+}
+
+// Team-Gliederung oben in "Aktivitäten": Alle / Team A / Team B / ...
+function renderTaskFilterRow() {
+  const row = document.getElementById("taskFilterRow");
+  if (!row) return;
+  row.innerHTML = '<button class="chip' + (state.taskViewFilter === "all" ? " active" : "") + '" data-filter="all">Alle</button>';
+  state.teams.forEach((team, idx) => {
+    const color = teamColorByIndex(idx);
+    const b = document.createElement("button");
+    b.className = "chip team-chip" + (state.taskViewFilter === team.id ? " active" : "");
+    b.dataset.filter = team.id;
+    b.textContent = team.name;
+    b.style.setProperty("--chip-color", color);
+    row.appendChild(b);
+  });
+  row.querySelectorAll(".chip").forEach((chip) => {
+    chip.onclick = () => {
+      state.taskViewFilter = chip.dataset.filter;
+      renderTaskFilterRow();
+      renderTasksView();
     };
   });
 }
@@ -766,15 +839,19 @@ function buildTaskCard(task, occ) {
   const overdue = u.remainingMs < 0;
   const widthPct = Math.round(u.fractionRemaining * 100);
   const occurrenceDateStr = occ ? occ.occurrenceDateStr : undefined;
+  const color = colorForTask(task);
+  const teamLabel = teamNamesForTask(task);
 
   const card = document.createElement("div");
   card.className = "task-card";
+  if (color) card.style.borderLeft = `4px solid ${color}`;
   card.innerHTML = `
     <div class="task-top">
       <div class="task-title">${escapeHtml(task.title)}</div>
       <div class="task-points">${task.points} P.</div>
     </div>
     <div class="task-assignees">${escapeHtml(assigneeLine(task, occurrenceDateStr))}</div>
+    ${teamLabel ? `<div class="task-team-label" style="color:${color}">🏷 ${escapeHtml(teamLabel)}</div>` : ""}
     <div class="urgency-track"><div class="urgency-fill" style="width:${overdue ? 100 : widthPct}%; background:${urgencyColor(u.remainingDays, overdue)}"></div></div>
     <div class="urgency-label" style="color:${urgencyColor(u.remainingDays, overdue)}">${urgencyLabel(u)}</div>
   `;
@@ -794,49 +871,74 @@ function formatWeekRange(weekStart) {
   return `${fmt(weekStart)}–${fmt(weekEndIncl)}`;
 }
 
-// Zeigt die Aufgaben der aktuellen Ansicht (Alle / eine Person) als
-// Monatsvorschau: einen Abschnitt pro Kalenderwoche (laufende + die nächsten
-// PLANNING_HORIZON_WEEKS - 1), jeweils mit den für diese Woche relevanten
-// Aufgaben. Eine rotierende Aufgabe, die mehrmals pro Woche fällig ist (z.B.
-// alle 2 Tage), erscheint dabei als mehrere eigene Karten mit je eigenem
-// Datum und ggf. eigener zuständiger Person - echte To-Do-Liste statt nur
-// eines Platzhalters pro Woche. Ein erledigtes Vorkommnis verschwindet sofort
-// wieder (unabhängig vom restlichen Wochenverlauf); feste Aufgaben erscheinen
-// einmalig in der Woche, in die ihr aktuelles Fälligkeitsdatum fällt.
-function renderHomeTaskList() {
-  const el = document.getElementById("taskList");
+// Baut die Liste der relevanten { task, occ }-Einträge für eine einzelne
+// Kalenderwoche (für die aktuelle Home-Ansicht Alle / eine Person). Eine
+// rotierende Aufgabe, die mehrmals pro Woche fällig ist (z.B. alle 2 Tage),
+// erscheint dabei als mehrere eigene Einträge mit je eigenem Datum und ggf.
+// eigener zuständiger Person - echte To-Do-Liste statt nur eines Platzhalters
+// pro Woche. Ein erledigtes Vorkommnis verschwindet sofort wieder (unabhängig
+// vom restlichen Wochenverlauf); feste Aufgaben erscheinen einmalig in der
+// Woche, in die ihr aktuelles Fälligkeitsdatum fällt.
+function weekItemsFor(weekStart, i) {
+  const weekEnd = getWeekEnd(weekStart);
+  const weekStartStr = isoDateOnly(weekStart);
+
+  const rotatingItems = state.taskAssignments
+    .filter((a) => a.week_start === weekStartStr && !a.completed_at)
+    .filter((a) => state.homeFilter === "all" || a.member_id === state.homeFilter)
+    .map((a) => {
+      const task = state.tasks.find((t) => t.id === a.task_id);
+      if (!task) return null;
+      return { task, occ: { occurrenceDateStr: a.occurrence_date, dueDate: new Date(a.occurrence_date + "T00:00:00") } };
+    })
+    .filter(Boolean);
+
+  const fixedItems = state.tasks
+    .filter((t) => !t.rotation_enabled)
+    .filter((t) => {
+      const isMine = state.homeFilter === "all" || !t.assigned_member_ids || t.assigned_member_ids.length === 0 || t.assigned_member_ids.includes(state.homeFilter);
+      if (!isMine) return false;
+      const due = taskUrgency(t).dueDate;
+      if (due >= weekEnd) return false;
+      if (i > 0 && due < weekStart) return false; // schon in einer früheren Woche gezeigt (überfällig -> nur "diese Woche")
+      return true;
+    })
+    .map((t) => ({ task: t, occ: null }));
+
+  return [...rotatingItems, ...fixedItems].sort(
+    (a, b) => effectiveUrgency(a.task, a.occ).remainingMs - effectiveUrgency(b.task, b.occ).remainingMs
+  );
+}
+
+// Home-Block "Aufgaben dieser Woche": nur die laufende Kalenderwoche.
+function renderHomeTaskListCurrent() {
+  const el = document.getElementById("taskListCurrent");
+  if (!el) return;
+  el.innerHTML = "";
+  const weekStart = horizonWeekStarts()[0];
+  const items = weekItemsFor(weekStart, 0);
+  if (items.length === 0) {
+    el.innerHTML = state.homeFilter === "all"
+      ? '<p class="empty-state">🎉 Diese Woche ist nichts mehr offen!</p>'
+      : '<p class="empty-state">🎉 Für dich ist diese Woche nichts mehr offen!</p>';
+    return;
+  }
+  items.forEach(({ task, occ }) => el.appendChild(buildTaskCard(task, occ)));
+}
+
+// Home-Block "Zukünftige Aufgaben": die restlichen Wochen des Planungs-
+// Horizonts (Monatsvorschau), weiterhin mit Wochen-Abschnittsüberschriften.
+function renderHomeTaskListFuture() {
+  const el = document.getElementById("taskListFuture");
+  if (!el) return;
   el.innerHTML = "";
 
   const weekStarts = horizonWeekStarts();
   let anyShown = false;
 
   weekStarts.forEach((weekStart, i) => {
-    const weekEnd = getWeekEnd(weekStart);
-    const weekStartStr = isoDateOnly(weekStart);
-
-    const rotatingItems = state.taskAssignments
-      .filter((a) => a.week_start === weekStartStr && !a.completed_at)
-      .filter((a) => state.homeFilter === "all" || a.member_id === state.homeFilter)
-      .map((a) => {
-        const task = state.tasks.find((t) => t.id === a.task_id);
-        if (!task) return null;
-        return { task, occ: { occurrenceDateStr: a.occurrence_date, dueDate: new Date(a.occurrence_date + "T00:00:00") } };
-      })
-      .filter(Boolean);
-
-    const fixedItems = state.tasks
-      .filter((t) => !t.rotation_enabled)
-      .filter((t) => {
-        const isMine = state.homeFilter === "all" || !t.assigned_member_ids || t.assigned_member_ids.length === 0 || t.assigned_member_ids.includes(state.homeFilter);
-        if (!isMine) return false;
-        const due = taskUrgency(t).dueDate;
-        if (due >= weekEnd) return false;
-        if (i > 0 && due < weekStart) return false; // schon in einer früheren Woche gezeigt (überfällig -> nur "diese Woche")
-        return true;
-      })
-      .map((t) => ({ task: t, occ: null }));
-
-    const items = [...rotatingItems, ...fixedItems];
+    if (i === 0) return; // laufende Woche -> siehe renderHomeTaskListCurrent
+    const items = weekItemsFor(weekStart, i);
     if (items.length === 0) return;
     anyShown = true;
 
@@ -845,24 +947,31 @@ function renderHomeTaskList() {
     header.textContent = `${WEEK_LABELS[i] || "In " + i + " Wochen"} · ${formatWeekRange(weekStart)}`;
     el.appendChild(header);
 
-    items
-      .sort((a, b) => effectiveUrgency(a.task, a.occ).remainingMs - effectiveUrgency(b.task, b.occ).remainingMs)
-      .forEach(({ task, occ }) => el.appendChild(buildTaskCard(task, occ)));
+    items.forEach(({ task, occ }) => el.appendChild(buildTaskCard(task, occ)));
   });
 
   if (!anyShown) {
-    el.innerHTML = state.homeFilter === "all"
-      ? '<p class="empty-state">Keine Aufgaben. Füge welche unter „Aktivitäten“ hinzu.</p>'
-      : '<p class="empty-state">🎉 Alle Aufgaben für diesen Monat erledigt!</p>';
+    el.innerHTML = '<p class="empty-state">Keine weiteren Aufgaben in den nächsten Wochen geplant.</p>';
   }
+}
+
+function renderHomeTaskList() {
+  renderHomeTaskListCurrent();
+  renderHomeTaskListFuture();
 }
 
 function renderTasksView() {
   const el = document.getElementById("allTaskList");
   el.innerHTML = "";
-  const tasks = sortByUrgency(state.tasks);
+  const filtered = state.tasks.filter((t) => {
+    if (state.taskViewFilter === "all") return true;
+    return t.team_ids && t.team_ids.includes(state.taskViewFilter);
+  });
+  const tasks = sortByUrgency(filtered);
   if (tasks.length === 0) {
-    el.innerHTML = '<p class="empty-state">Noch keine Aufgaben erstellt.</p>';
+    el.innerHTML = state.taskViewFilter === "all"
+      ? '<p class="empty-state">Noch keine Aufgaben erstellt.</p>'
+      : '<p class="empty-state">Keine Aufgaben für dieses Team.</p>';
     return;
   }
   tasks.forEach((t) => el.appendChild(buildTaskCard(t)));
