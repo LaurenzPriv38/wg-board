@@ -362,6 +362,31 @@ function lastCompletedTaskAt(taskId, memberId) {
   return last;
 }
 
+// Wer diese Aufgabe in einem gegebenen Wochenfenster [start, end) erledigt hat
+// (die zuletzt erledigende Person in diesem Fenster, falls mehrere).
+function memberWhoCompletedInRange(taskId, start, end) {
+  const matches = state.completions
+    .filter((c) => c.task_id === taskId && new Date(c.completed_at) >= start && new Date(c.completed_at) < end)
+    .sort((a, b) => new Date(b.completed_at) - new Date(a.completed_at));
+  return matches.length ? matches[0].member_id : null;
+}
+
+// Falls dieselbe Person diese Aufgabe die letzten 2 Kalenderwochen in Folge
+// erledigt hat, muss diese Woche zwingend jemand anderes ran.
+function mustRotateAwayFrom(taskId, thisWeekStart) {
+  const week1Start = new Date(thisWeekStart);
+  week1Start.setDate(week1Start.getDate() - 7);
+  const week2Start = new Date(week1Start);
+  week2Start.setDate(week2Start.getDate() - 7);
+
+  const lastWeekMember = memberWhoCompletedInRange(taskId, week1Start, thisWeekStart);
+  const weekBeforeMember = memberWhoCompletedInRange(taskId, week2Start, week1Start);
+  if (lastWeekMember && lastWeekMember === weekBeforeMember) {
+    return lastWeekMember;
+  }
+  return null;
+}
+
 // Berechnet, wer für jede rotierende Aufgabe, die in der laufenden Kalenderwoche
 // fällig wird, eingeplant ist - mit dem Ziel, dass alle über den Monat hinweg
 // möglichst nah an ihren Soll-Anteil kommen. Wird zustandslos bei jedem Rendern
@@ -383,15 +408,23 @@ function computeWeekPlan() {
   });
   let virtualTotal = Object.values(virtualEarned).reduce((a, b) => a + b, 0);
 
-  const dueThisWeek = state.tasks.filter((t) => t.rotation_enabled && taskUrgency(t).dueDate < weekEnd);
+  // Jede rotierende Aufgabe wird JEDE Woche zugeteilt, unabhängig vom genauen
+  // Fälligkeitsdatum - der Zyklus bestimmt nur noch Dringlichkeit/Überfälligkeit,
+  // nicht mehr, ob diese Woche überhaupt jemand eingeplant wird.
+  const rotatingTasks = state.tasks.filter((t) => t.rotation_enabled);
   // Größte Punktwerte zuerst verteilen - die haben den größten Einfluss auf die Fairness.
-  dueThisWeek.sort((a, b) => b.points - a.points || taskUrgency(a).dueDate - taskUrgency(b).dueDate);
+  rotatingTasks.sort((a, b) => b.points - a.points);
 
-  dueThisWeek.forEach((t) => {
-    const pool = t.assigned_member_ids && t.assigned_member_ids.length
+  rotatingTasks.forEach((t) => {
+    const fullPool = t.assigned_member_ids && t.assigned_member_ids.length
       ? t.assigned_member_ids.filter((id) => state.members.some((m) => m.id === id))
       : state.members.map((m) => m.id);
-    if (pool.length === 0) return;
+    if (fullPool.length === 0) return;
+
+    // Harte Regel: höchstens 2 Wochen in Folge dieselbe Person - außer es gibt
+    // schlicht niemand anderen im Pool.
+    const forbidden = mustRotateAwayFrom(t.id, weekStart);
+    const pool = fullPool.length > 1 && forbidden ? fullPool.filter((id) => id !== forbidden) : fullPool;
 
     let best = null;
     let bestDeficit = -Infinity;
@@ -426,11 +459,7 @@ function computeWeekPlan() {
 function assigneeLine(task) {
   if (task.rotation_enabled) {
     const assignedId = state.weekPlan[task.id];
-    if (assignedId) return "🔁 Diese Woche: " + memberName(assignedId);
-    const poolNames = task.assigned_member_ids && task.assigned_member_ids.length
-      ? task.assigned_member_ids.map((id) => memberName(id)).join(", ")
-      : "alle";
-    return "🔁 Rotierend (" + poolNames + ")";
+    return assignedId ? "🔁 Diese Woche: " + memberName(assignedId) : "🔁 Rotierend";
   }
   const assignedNames = task.assigned_member_ids && task.assigned_member_ids.length
     ? task.assigned_member_ids.map((id) => memberName(id)).join(", ")
@@ -595,10 +624,9 @@ function updateAssignModeUI() {
   document.querySelectorAll(".mode-btn").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.mode === assignMode);
   });
-  document.getElementById("assigneeHint").textContent =
-    assignMode === "rotating"
-      ? "Legt fest, wer für die Rotation infrage kommt. Niemand ausgewählt = alle WG-Mitglieder rotieren."
-      : "Niemand ausgewählt = Aufgabe gilt für alle.";
+  // Bei "Rotierend" rotieren immer alle WG-Mitglieder - keine Personen-Auswahl nötig.
+  document.getElementById("fixedAssigneeSection").classList.toggle("hidden", assignMode === "rotating");
+  document.getElementById("rotatingHint").classList.toggle("hidden", assignMode !== "rotating");
 }
 
 document.querySelectorAll(".mode-btn").forEach((btn) => {
@@ -640,7 +668,8 @@ document.getElementById("btnSaveTask").onclick = async () => {
     details: document.getElementById("taskDetails").value.trim(),
     cycle_days: parseInt(document.getElementById("cycleDaysSlider").value, 10),
     points: parseInt(document.getElementById("pointsSlider").value, 10),
-    assigned_member_ids: Array.from(selectedAssignees),
+    // Rotierend = immer alle Mitglieder, keine Pool-Einschränkung mehr möglich.
+    assigned_member_ids: assignMode === "rotating" ? [] : Array.from(selectedAssignees),
     rotation_enabled: assignMode === "rotating",
   };
 
