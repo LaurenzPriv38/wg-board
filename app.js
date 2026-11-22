@@ -15,7 +15,7 @@ let state = {
   members: [],
   tasks: [],
   completions: [],
-  taskAssignments: [], // { task_id, week_start, member_id } - wer eine rotierende Aufgabe in welcher Woche macht
+  taskAssignments: [], // { task_id, occurrence_date, week_start, member_id, completed_at } - wer welches konkrete Vorkommnis einer rotierenden Aufgabe macht
   teams: [], // { id, wg_id, name }
   teamMembers: [], // { team_id, member_id, quota_percent, points } - Mitgliedschaft + Soll-Anteil + Team-Punkte
   me: null,
@@ -338,14 +338,22 @@ function renderFilterRow() {
   });
 }
 
-function taskUrgency(task) {
-  const lastDone = new Date(task.last_done_at).getTime();
-  const cycleMs = task.cycle_days * 86400000;
-  const dueAt = lastDone + cycleMs;
-  const remainingMs = dueAt - Date.now();
+// Baut ein Fälligkeits-Objekt für ein beliebiges Datum (z.B. ein konkretes
+// vorausgeplantes Vorkommnis einer rotierenden Aufgabe, nicht nur das
+// "aktuelle" last_done_at-basierte Fälligkeitsdatum).
+function urgencyForDueDate(dueDate, cycleMs) {
+  const remainingMs = dueDate.getTime() - Date.now();
   const remainingDays = remainingMs / 86400000;
   const fractionRemaining = Math.max(0, Math.min(1, remainingMs / cycleMs));
-  return { remainingMs, remainingDays, fractionRemaining, cycleMs, dueDate: new Date(dueAt) };
+  return { remainingMs, remainingDays, fractionRemaining, cycleMs, dueDate };
+}
+
+// Das reale, aus last_done_at hochgerechnete Fälligkeitsdatum einer Aufgabe -
+// für feste Aufgaben weiterhin die einzige Quelle; für rotierende Aufgaben nur
+// noch der Ausgangspunkt für das allererste Vorkommnis (siehe projectOccurrences).
+function taskUrgency(task) {
+  const dueAt = new Date(task.last_done_at).getTime() + task.cycle_days * 86400000;
+  return urgencyForDueDate(new Date(dueAt), task.cycle_days * 86400000);
 }
 
 function urgencyColor(remainingDays, overdue) {
@@ -415,43 +423,52 @@ function lastCompletedTaskAt(taskId, memberId) {
   return last;
 }
 
-// Wer diese Aufgabe in einem gegebenen Wochenfenster [start, end) erledigt hat
-// (die zuletzt erledigende Person in diesem Fenster, falls mehrere).
-function memberWhoCompletedInRange(taskId, start, end) {
-  const matches = state.completions
-    .filter((c) => c.task_id === taskId && new Date(c.completed_at) >= start && new Date(c.completed_at) < end)
-    .sort((a, b) => new Date(b.completed_at) - new Date(a.completed_at));
-  return matches.length ? matches[0].member_id : null;
-}
-
-// Wer eine Aufgabe in einer bestimmten Kalenderwoche macht/machen wird -
-// schaut zuerst in die in diesem Planungslauf gerade entschiedenen bzw.
-// bereits persistierten Zuteilungen, sonst in die echten completions. So
-// greift die 2-Wochen-Regel auch INNERHALB eines Monats-Planungslaufs
-// (z.B. Woche 2 vs. Woche 1, die im selben Lauf gerade erst entschieden wurde).
-function assigneeForTaskAtWeek(taskId, weekStartStr, decidedMap) {
-  if (decidedMap[taskId] && decidedMap[taskId][weekStartStr]) return decidedMap[taskId][weekStartStr];
-  const persisted = assignmentFor(taskId, weekStartStr);
-  if (persisted) return persisted;
-  const ws = new Date(weekStartStr + "T00:00:00");
-  return memberWhoCompletedInRange(taskId, ws, getWeekEnd(ws));
-}
-
-// Falls dieselbe Person diese Aufgabe die letzten 2 Kalenderwochen in Folge
-// (gesehen von "weekStart" aus) macht/gemacht hat, muss diese Woche zwingend
-// jemand anderes ran.
-function mustRotateAwayFromAt(taskId, weekStart, decidedMap) {
-  const week1Start = new Date(weekStart);
-  week1Start.setDate(week1Start.getDate() - 7);
-  const week2Start = new Date(week1Start);
-  week2Start.setDate(week2Start.getDate() - 7);
-
-  const lastWeekMember = assigneeForTaskAtWeek(taskId, isoDateOnly(week1Start), decidedMap);
-  const weekBeforeMember = assigneeForTaskAtWeek(taskId, isoDateOnly(week2Start), decidedMap);
-  if (lastWeekMember && lastWeekMember === weekBeforeMember) {
-    return lastWeekMember;
+// Wer eine Aufgabe an einem bestimmten Vorkommnis-Datum macht/machen wird -
+// schaut zuerst in die in diesem Planungslauf gerade entschiedenen, sonst in
+// die bereits persistierten Zuteilungen.
+function assigneeForOccurrence(taskId, occurrenceDateStr, decidedMap) {
+  if (decidedMap[taskId] && decidedMap[taskId][occurrenceDateStr] !== undefined) {
+    return decidedMap[taskId][occurrenceDateStr];
   }
+  return assignmentFor(taskId, occurrenceDateStr);
+}
+
+// Die beiden Vorkommnis-Daten dieser Aufgabe unmittelbar VOR
+// "occurrenceDateStr" (persistiert oder in diesem Planungslauf schon
+// entschieden), chronologisch sortiert.
+function previousTwoOccurrenceDates(taskId, occurrenceDateStr, decidedMap) {
+  const known = new Set([
+    ...Object.keys(decidedMap[taskId] || {}),
+    ...state.taskAssignments.filter((a) => a.task_id === taskId).map((a) => a.occurrence_date),
+  ]);
+  return Array.from(known)
+    .filter((d) => d < occurrenceDateStr)
+    .sort()
+    .slice(-2);
+}
+
+// Falls dieselbe Person diese Aufgabe die letzten 2 Vorkommnisse in Folge
+// macht/gemacht hat, muss dieses Mal zwingend jemand anderes ran. (Bei einer
+// Aufgabe, die mehrmals pro Woche fällig ist, sind das nicht zwangsläufig 2
+// Kalenderwochen, sondern die letzten 2 tatsächlichen Vorkommnisse.)
+function mustRotateAwayFromAt(taskId, occurrenceDateStr, decidedMap) {
+  const prevTwo = previousTwoOccurrenceDates(taskId, occurrenceDateStr, decidedMap);
+  if (prevTwo.length < 2) return null;
+  const [d1, d2] = prevTwo;
+  const m1 = assigneeForOccurrence(taskId, d1, decidedMap);
+  const m2 = assigneeForOccurrence(taskId, d2, decidedMap);
+  if (m1 && m1 === m2) return m1;
   return null;
+}
+
+// Das nächste noch offene (nicht erledigte) Vorkommnis einer rotierenden
+// Aufgabe - für Ansichten, die nur EIN repräsentatives Datum brauchen
+// (Aktivitäten-Liste, Detailansicht ohne konkreten Wochen-Kontext).
+function nextOpenOccurrence(taskId) {
+  const open = state.taskAssignments
+    .filter((a) => a.task_id === taskId && !a.completed_at)
+    .sort((a, b) => (a.occurrence_date < b.occurrence_date ? -1 : a.occurrence_date > b.occurrence_date ? 1 : 0));
+  return open.length ? open[0] : null;
 }
 
 // Datum als "YYYY-MM-DD" in LOKALER Zeit (nicht toISOString(), das würde bei
@@ -463,9 +480,9 @@ function isoDateOnly(d) {
   return `${y}-${m}-${day}`;
 }
 
-// Zuteilung für eine bestimmte Kalenderwoche nachschlagen.
-function assignmentFor(taskId, weekStartStr) {
-  const row = state.taskAssignments.find((a) => a.task_id === taskId && a.week_start === weekStartStr);
+// Zuteilung für ein bestimmtes Vorkommnis-Datum (YYYY-MM-DD) nachschlagen.
+function assignmentFor(taskId, occurrenceDateStr) {
+  const row = state.taskAssignments.find((a) => a.task_id === taskId && a.occurrence_date === occurrenceDateStr);
   return row ? row.member_id : null;
 }
 
@@ -513,21 +530,43 @@ function horizonWeekStarts() {
   return weeks;
 }
 
-// Projiziert, in welche der Horizont-Wochen eine rotierende Aufgabe laut ihrem
-// Zyklus fallen würde (eine "Vorkommnis" pro Woche, in der sie fällig wäre) -
-// ausgehend vom ECHTEN aktuellen Fälligkeitsdatum, danach so getan, als würde
-// sie pünktlich im Zyklus-Rhythmus weiterlaufen. Eine wöchentliche Aufgabe
-// erzeugt so z.B. 4 Vorkommnisse (eins pro Woche), eine 14-tägige nur 2.
+// Projiziert, welche künftigen Vorkommnisse einer rotierenden Aufgabe noch
+// NEU in den Horizont fallen (jeweils ein konkretes Datum - bei einer
+// 2-tägigen Aufgabe z.B. 3 Vorkommnisse pro Woche, nicht nur eins). Setzt
+// dort fort, wo die Aufgabe schon geplant ist (jüngstes bekanntes
+// Vorkommnis-Datum + 1 Zyklus); gibt es noch gar kein Vorkommnis, startet die
+// Projektion beim ECHTEN aktuellen Fälligkeitsdatum. Danach läuft die Reihe
+// STARR im Zyklus-Rhythmus weiter, unabhängig davon, ob ein Vorkommnis
+// pünktlich/vorzeitig erledigt wird - sonst würde ein frühzeitiges Erledigen
+// alle künftig schon verplanten Termine verschieben.
 function projectOccurrences(task, weekStarts) {
   const occurrences = [];
-  let dueDate = taskUrgency(task).dueDate;
   const horizonEnd = getWeekEnd(weekStarts[weekStarts.length - 1]);
+
+  const knownDates = state.taskAssignments
+    .filter((a) => a.task_id === task.id)
+    .map((a) => a.occurrence_date)
+    .sort();
+  const latestKnown = knownDates.length ? knownDates[knownDates.length - 1] : null;
+
+  let dueDate = latestKnown
+    ? new Date(new Date(latestKnown + "T00:00:00").getTime() + task.cycle_days * DAY_MS)
+    : taskUrgency(task).dueDate;
+
   let guard = 0;
-  while (dueDate < horizonEnd && guard < 20) {
+  while (dueDate < horizonEnd && guard < 60) {
     guard++;
-    const weekStart = weekStarts.find((w) => dueDate < getWeekEnd(w));
-    if (!weekStart) break;
-    occurrences.push({ task, weekStart, weekStartStr: isoDateOnly(weekStart) });
+    let weekStart = weekStarts.find((w) => dueDate < getWeekEnd(w));
+    if (!weekStart && dueDate < weekStarts[0]) weekStart = weekStarts[0]; // stark überfällig -> laufende Woche
+    if (weekStart) {
+      occurrences.push({
+        task,
+        dueDate: new Date(dueDate),
+        occurrenceDateStr: isoDateOnly(dueDate),
+        weekStart,
+        weekStartStr: isoDateOnly(weekStart),
+      });
+    }
     dueDate = new Date(dueDate.getTime() + task.cycle_days * DAY_MS);
   }
   return occurrences;
@@ -538,16 +577,15 @@ function projectOccurrences(task, weekStarts) {
 // rotierenden Aufgaben in einem Rutsch. Schon bestehende Zuteilungen werden
 // NIE überschrieben (stabil) - sie zählen aber als bereits "verbraucht" für
 // den Rest der Verteilung, damit jemand, der in Woche 1 schon viel bekommen
-// hat, in Woche 2-4 nicht erneut bevorzugt wird (genau das war der Bug bei
-// der wochenweisen Planung: jeder einzelne planWeek()-Aufruf kannte nur die
-// echten, bereits erledigten Punkte, nicht die noch offenen Zuteilungen
-// anderer Wochen im selben Zeitraum).
+// hat, in Woche 2-4 nicht erneut bevorzugt wird. Innerhalb der Verteilung wird
+// chronologisch (Woche für Woche, Tag für Tag) vorgegangen, damit nach
+// Möglichkeit schon jede einzelne Woche für sich fair verteilt ist - die
+// laufend mitgeführten virtuellen Punktestände sorgen zusätzlich dafür, dass
+// es spätestens über den ganzen Monat hinweg passt.
 //
 // Jedes Team (bzw. jede Team-Kombination/die teamübergreifende "Alle"-Gruppe)
 // ist dabei eine eigene, unabhängige Fairness-Blase: eine Aufgabe für Team A
-// beeinflusst nie, wer in Team B dran ist. Über den ganzen Horizont (~4
-// Wochen) hinweg soll am Ende jede Person möglichst nah an ihrem Soll-Anteil
-// liegen.
+// beeinflusst nie, wer in Team B dran ist.
 async function planHorizon() {
   if (state.members.length === 0) return;
 
@@ -555,28 +593,48 @@ async function planHorizon() {
   if (rotatingTasks.length === 0) return;
 
   const weekStarts = horizonWeekStarts();
-  let allOccurrences = [];
+  const horizonStartStr = isoDateOnly(weekStarts[0]);
+  const horizonEndStr = isoDateOnly(getWeekEnd(weekStarts[weekStarts.length - 1]));
+
+  // Brandneue, noch nicht persistierte Vorkommnisse, die diesmal entschieden werden müssen.
+  let newOccurrences = [];
   rotatingTasks.forEach((t) => {
-    allOccurrences = allOccurrences.concat(projectOccurrences(t, weekStarts));
+    newOccurrences = newOccurrences.concat(projectOccurrences(t, weekStarts));
   });
-  if (allOccurrences.length === 0) return;
+  if (newOccurrences.length === 0) return;
+
+  // Schon bestehende (persistierte, noch nicht erledigte) Vorkommnisse
+  // innerhalb des Horizonts - zählen als bereits vergeben für die
+  // Fairness-Rechnung, werden aber nicht neu entschieden.
+  const existingOpen = state.taskAssignments.filter(
+    (a) => !a.completed_at && a.occurrence_date >= horizonStartStr && a.occurrence_date < horizonEndStr
+  );
 
   // Nach Fairness-Kontext gruppieren - jeder Kontext wird unabhängig geplant.
-  const groups = {};
-  allOccurrences.forEach((o) => {
+  const groups = {}; // scopeKey -> { pending: [...occurrence...], already: [{memberId, points}] }
+  newOccurrences.forEach((o) => {
     const key = scopeKeyForTask(o.task);
-    (groups[key] = groups[key] || []).push(o);
+    groups[key] = groups[key] || { pending: [], already: [] };
+    groups[key].pending.push(o);
+  });
+  existingOpen.forEach((a) => {
+    const task = state.tasks.find((t) => t.id === a.task_id);
+    if (!task) return;
+    const key = scopeKeyForTask(task);
+    groups[key] = groups[key] || { pending: [], already: [] };
+    groups[key].already.push({ memberId: a.member_id, points: task.points });
   });
 
   const inserts = [];
 
-  // decidedMap: task_id -> { weekStartStr: memberId } - sowohl bereits
-  // persistierte als auch in diesem Lauf neu entschiedene Zuteilungen, damit
-  // die 2-Wochen-Regel auch innerhalb dieses einen Planungslaufs greift.
+  // decidedMap: task_id -> { occurrenceDateStr: memberId } - sowohl bereits
+  // persistierte (jeder Status) als auch in diesem Lauf neu entschiedene
+  // Zuteilungen, damit die "höchstens 2 Vorkommnisse in Folge"-Regel auch
+  // innerhalb dieses einen Planungslaufs greift.
   const decidedMap = {};
   state.taskAssignments.forEach((a) => {
     decidedMap[a.task_id] = decidedMap[a.task_id] || {};
-    decidedMap[a.task_id][a.week_start] = a.member_id;
+    decidedMap[a.task_id][a.occurrence_date] = a.member_id;
   });
 
   Object.keys(groups).forEach((scopeKey) => {
@@ -597,23 +655,24 @@ async function planHorizon() {
     });
     let virtualTotal = Object.values(virtualEarned).reduce((a, b) => a + b, 0);
 
-    const occsInScope = groups[scopeKey];
-    const already = occsInScope.filter((o) => assignmentFor(o.task.id, o.weekStartStr));
-    const pending = occsInScope.filter((o) => !assignmentFor(o.task.id, o.weekStartStr));
-
     // Bereits zugeteilte (gesperrte) Vorkommnisse zuerst "einbuchen" - sie
     // werden nicht neu entschieden, zählen aber für den Rest der Verteilung
-    // als bereits vergeben.
-    already.forEach((o) => {
-      const mId = assignmentFor(o.task.id, o.weekStartStr);
-      virtualEarned[mId] = (virtualEarned[mId] || 0) + o.task.points;
-      virtualTotal += o.task.points;
+    // als bereits vergeben (das war der Kernfehler der wochenweisen Planung:
+    // jeder Lauf kannte nur die echten, bereits erledigten Punkte, nicht die
+    // noch offenen Zuteilungen anderer Wochen im selben Zeitraum).
+    groups[scopeKey].already.forEach(({ memberId, points }) => {
+      virtualEarned[memberId] = (virtualEarned[memberId] || 0) + points;
+      virtualTotal += points;
     });
 
-    // Größte Punktwerte zuerst verteilen (größter Einfluss auf die
-    // Fairness), bei Gleichstand chronologisch (stabile Reihenfolge je
-    // Aufgabe), damit die 2-Wochen-Regel sinnvoll greift.
-    pending.sort((a, b) => b.task.points - a.task.points || a.weekStart - b.weekStart);
+    // Chronologisch zuerst (Woche für Woche, Tag für Tag), bei Gleichstand
+    // größte Punktwerte zuerst - sorgt dafür, dass jede Woche für sich schon
+    // möglichst fair verteilt wird, während die laufend mitgeführten
+    // virtuellen Punktestände am Ende trotzdem über den ganzen Monat
+    // ausgleichen.
+    const pending = [...groups[scopeKey].pending].sort(
+      (a, b) => a.dueDate - b.dueDate || b.task.points - a.task.points
+    );
 
     pending.forEach((o) => {
       const t = o.task;
@@ -622,9 +681,9 @@ async function planHorizon() {
         : fullPool;
       if (taskPool.length === 0) return;
 
-      // Harte Regel: höchstens 2 Wochen in Folge dieselbe Person - außer es gibt
-      // schlicht niemand anderen im Pool.
-      const forbidden = mustRotateAwayFromAt(t.id, o.weekStart, decidedMap);
+      // Harte Regel: höchstens 2 Vorkommnisse in Folge dieselbe Person -
+      // außer es gibt schlicht niemand anderen im Pool.
+      const forbidden = mustRotateAwayFromAt(t.id, o.occurrenceDateStr, decidedMap);
       const pool = taskPool.length > 1 && forbidden ? taskPool.filter((id) => id !== forbidden) : taskPool;
 
       let best = null;
@@ -651,8 +710,8 @@ async function planHorizon() {
         virtualEarned[best] = (virtualEarned[best] || 0) + t.points;
         virtualTotal += t.points;
         decidedMap[t.id] = decidedMap[t.id] || {};
-        decidedMap[t.id][o.weekStartStr] = best;
-        const row = { task_id: t.id, week_start: o.weekStartStr, member_id: best };
+        decidedMap[t.id][o.occurrenceDateStr] = best;
+        const row = { task_id: t.id, occurrence_date: o.occurrenceDateStr, week_start: o.weekStartStr, member_id: best };
         // Direkt im State ergänzen, damit die Anzeige sofort passt, ohne auf
         // einen erneuten loadData()-Roundtrip warten zu müssen.
         state.taskAssignments.push(row);
@@ -662,18 +721,19 @@ async function planHorizon() {
   });
 
   if (inserts.length > 0) {
-    await sb.from("task_assignments").upsert(inserts, { onConflict: "task_id,week_start" });
+    await sb.from("task_assignments").upsert(inserts, { onConflict: "task_id,occurrence_date" });
   }
 }
 
 // Anzeige-Text für die Zuständigkeit einer Aufgabe (Karte + Detailansicht).
-// weekStartStr (optional) = für welche Woche die Zuteilung angezeigt werden
-// soll (z.B. innerhalb eines Wochen-Abschnitts der Monatsansicht) - Standard:
-// die laufende Woche.
-function assigneeLine(task, weekStartStr) {
+// occurrenceDateStr (optional) = für welches konkrete Vorkommnis-Datum die
+// Zuteilung angezeigt werden soll - Standard: das nächste noch offene
+// Vorkommnis (bzw. das reale aktuelle Fälligkeitsdatum, falls noch keins
+// geplant ist).
+function assigneeLine(task, occurrenceDateStr) {
   if (task.rotation_enabled) {
-    const ws = weekStartStr || isoDateOnly(getWeekStart(new Date()));
-    const assignedId = assignmentFor(task.id, ws);
+    const ds = occurrenceDateStr || (nextOpenOccurrence(task.id) ? nextOpenOccurrence(task.id).occurrence_date : null);
+    const assignedId = ds ? assignmentFor(task.id, ds) : null;
     return assignedId ? "🔁 " + memberName(assignedId) : "🔁 Rotierend";
   }
   const assignedNames = task.assigned_member_ids && task.assigned_member_ids.length
@@ -682,10 +742,30 @@ function assigneeLine(task, weekStartStr) {
   return "👥 " + assignedNames;
 }
 
-function buildTaskCard(task, weekStartStr) {
-  const u = taskUrgency(task);
+// Das für eine Karte/Detailansicht relevante Fälligkeitsdatum: bei einem
+// konkreten Vorkommnis (occ) dessen eigenes Datum, sonst - für rotierende
+// Aufgaben - das nächste noch offene Vorkommnis, sonst das reale,
+// last_done_at-basierte Fälligkeitsdatum (feste Aufgaben, oder rotierende
+// Aufgaben, für die noch nichts geplant wurde).
+function effectiveUrgency(task, occ) {
+  const cycleMs = task.cycle_days * DAY_MS;
+  if (occ) return urgencyForDueDate(occ.dueDate, cycleMs);
+  if (task.rotation_enabled) {
+    const next = nextOpenOccurrence(task.id);
+    if (next) return urgencyForDueDate(new Date(next.occurrence_date + "T00:00:00"), cycleMs);
+  }
+  return taskUrgency(task);
+}
+
+// occ (optional): { dueDate, occurrenceDateStr } - ein konkretes Vorkommnis
+// (für die Wochen-Abschnitte der Monatsansicht). Ohne occ wird für rotierende
+// Aufgaben automatisch das nächste offene Vorkommnis herangezogen (z.B. für
+// die flache Aktivitäten-Liste).
+function buildTaskCard(task, occ) {
+  const u = effectiveUrgency(task, occ);
   const overdue = u.remainingMs < 0;
   const widthPct = Math.round(u.fractionRemaining * 100);
+  const occurrenceDateStr = occ ? occ.occurrenceDateStr : undefined;
 
   const card = document.createElement("div");
   card.className = "task-card";
@@ -694,16 +774,16 @@ function buildTaskCard(task, weekStartStr) {
       <div class="task-title">${escapeHtml(task.title)}</div>
       <div class="task-points">${task.points} P.</div>
     </div>
-    <div class="task-assignees">${escapeHtml(assigneeLine(task, weekStartStr))}</div>
+    <div class="task-assignees">${escapeHtml(assigneeLine(task, occurrenceDateStr))}</div>
     <div class="urgency-track"><div class="urgency-fill" style="width:${overdue ? 100 : widthPct}%; background:${urgencyColor(u.remainingDays, overdue)}"></div></div>
     <div class="urgency-label" style="color:${urgencyColor(u.remainingDays, overdue)}">${urgencyLabel(u)}</div>
   `;
-  card.onclick = () => openDetailModal(task);
+  card.onclick = () => openDetailModal(task, occ || null);
   return card;
 }
 
 function sortByUrgency(tasks) {
-  return [...tasks].sort((a, b) => taskUrgency(a).remainingMs - taskUrgency(b).remainingMs);
+  return [...tasks].sort((a, b) => effectiveUrgency(a).remainingMs - effectiveUrgency(b).remainingMs);
 }
 
 const WEEK_LABELS = ["Diese Woche", "Nächste Woche", "In 2 Wochen", "In 3 Wochen"];
@@ -717,10 +797,12 @@ function formatWeekRange(weekStart) {
 // Zeigt die Aufgaben der aktuellen Ansicht (Alle / eine Person) als
 // Monatsvorschau: einen Abschnitt pro Kalenderwoche (laufende + die nächsten
 // PLANNING_HORIZON_WEEKS - 1), jeweils mit den für diese Woche relevanten
-// Aufgaben. Rotierende Aufgaben können so über mehrere Wochen mit
-// unterschiedlichen Zuständigen auftauchen (ein Vorkommnis pro Woche, in der
-// sie laut Zyklus fällig sind); feste Aufgaben erscheinen einmalig in der
-// Woche, in die ihr aktuelles Fälligkeitsdatum fällt.
+// Aufgaben. Eine rotierende Aufgabe, die mehrmals pro Woche fällig ist (z.B.
+// alle 2 Tage), erscheint dabei als mehrere eigene Karten mit je eigenem
+// Datum und ggf. eigener zuständiger Person - echte To-Do-Liste statt nur
+// eines Platzhalters pro Woche. Ein erledigtes Vorkommnis verschwindet sofort
+// wieder (unabhängig vom restlichen Wochenverlauf); feste Aufgaben erscheinen
+// einmalig in der Woche, in die ihr aktuelles Fälligkeitsdatum fällt.
 function renderHomeTaskList() {
   const el = document.getElementById("taskList");
   el.innerHTML = "";
@@ -732,24 +814,30 @@ function renderHomeTaskList() {
     const weekEnd = getWeekEnd(weekStart);
     const weekStartStr = isoDateOnly(weekStart);
 
-    const tasksThisWeek = state.tasks.filter((t) => {
-      if (t.rotation_enabled) {
-        const assignedId = assignmentFor(t.id, weekStartStr);
-        if (!assignedId) return false;
-        if (state.homeFilter !== "all" && assignedId !== state.homeFilter) return false;
-        return true;
-      }
-      // Feste Aufgaben werden nicht vorausgeplant - sie erscheinen einmalig
-      // in der Woche, in die ihr aktuelles Fälligkeitsdatum fällt.
-      const isMine = state.homeFilter === "all" || !t.assigned_member_ids || t.assigned_member_ids.length === 0 || t.assigned_member_ids.includes(state.homeFilter);
-      if (!isMine) return false;
-      const due = taskUrgency(t).dueDate;
-      if (due >= weekEnd) return false;
-      if (i > 0 && due < weekStart) return false; // schon in einer früheren Woche gezeigt (überfällig -> nur "diese Woche")
-      return true;
-    });
+    const rotatingItems = state.taskAssignments
+      .filter((a) => a.week_start === weekStartStr && !a.completed_at)
+      .filter((a) => state.homeFilter === "all" || a.member_id === state.homeFilter)
+      .map((a) => {
+        const task = state.tasks.find((t) => t.id === a.task_id);
+        if (!task) return null;
+        return { task, occ: { occurrenceDateStr: a.occurrence_date, dueDate: new Date(a.occurrence_date + "T00:00:00") } };
+      })
+      .filter(Boolean);
 
-    if (tasksThisWeek.length === 0) return;
+    const fixedItems = state.tasks
+      .filter((t) => !t.rotation_enabled)
+      .filter((t) => {
+        const isMine = state.homeFilter === "all" || !t.assigned_member_ids || t.assigned_member_ids.length === 0 || t.assigned_member_ids.includes(state.homeFilter);
+        if (!isMine) return false;
+        const due = taskUrgency(t).dueDate;
+        if (due >= weekEnd) return false;
+        if (i > 0 && due < weekStart) return false; // schon in einer früheren Woche gezeigt (überfällig -> nur "diese Woche")
+        return true;
+      })
+      .map((t) => ({ task: t, occ: null }));
+
+    const items = [...rotatingItems, ...fixedItems];
+    if (items.length === 0) return;
     anyShown = true;
 
     const header = document.createElement("div");
@@ -757,7 +845,9 @@ function renderHomeTaskList() {
     header.textContent = `${WEEK_LABELS[i] || "In " + i + " Wochen"} · ${formatWeekRange(weekStart)}`;
     el.appendChild(header);
 
-    sortByUrgency(tasksThisWeek).forEach((t) => el.appendChild(buildTaskCard(t, weekStartStr)));
+    items
+      .sort((a, b) => effectiveUrgency(a.task, a.occ).remainingMs - effectiveUrgency(b.task, b.occ).remainingMs)
+      .forEach(({ task, occ }) => el.appendChild(buildTaskCard(task, occ)));
   });
 
   if (!anyShown) {
@@ -984,22 +1074,24 @@ document.getElementById("btnDeleteTask").onclick = async () => {
 
 let detailTaskId = null;
 let detailDoneBy = null;
+let detailOccurrenceDateStr = null; // welches konkrete Vorkommnis wurde angeklickt (falls eins)
 
-function openDetailModal(task) {
+function openDetailModal(task, occ) {
   detailTaskId = task.id;
+  detailOccurrenceDateStr = occ ? occ.occurrenceDateStr : null;
   detailDoneBy = state.me ? state.me.id : null;
 
   document.getElementById("detailTitle").textContent = task.title;
   document.getElementById("detailDetails").textContent = task.details || "";
 
-  const u = taskUrgency(task);
+  const u = effectiveUrgency(task, occ);
   const overdue = u.remainingMs < 0;
   const statusEl = document.getElementById("detailStatus");
   statusEl.textContent = urgencyLabel(u);
   statusEl.style.color = urgencyColor(u.remainingDays, overdue);
 
   document.getElementById("detailMeta").textContent =
-    `Zuständig: ${assigneeLine(task)} · Wert: ${task.points} Punkte · Zyklus: alle ${task.cycle_days} Tage`;
+    `Zuständig: ${assigneeLine(task, detailOccurrenceDateStr)} · Wert: ${task.points} Punkte · Zyklus: alle ${task.cycle_days} Tage`;
 
   const doneBySelect = document.getElementById("detailDoneBySelect");
   doneBySelect.innerHTML = "";
@@ -1061,6 +1153,18 @@ document.getElementById("btnCompleteTask").onclick = async () => {
           .eq("member_id", detailDoneBy);
       }
     }
+  }
+
+  // Falls diese Erledigung zu einem konkret geplanten Vorkommnis gehört, genau
+  // DIESES als erledigt markieren - nicht die ganze Woche/Aufgabe. Dadurch
+  // bleiben weitere Vorkommnisse derselben Aufgabe in derselben Woche (z.B.
+  // bei einem 2-Tage-Zyklus) unabhängig davon weiterhin offen und sichtbar.
+  if (detailOccurrenceDateStr) {
+    await sb
+      .from("task_assignments")
+      .update({ completed_at: nowIso })
+      .eq("task_id", task.id)
+      .eq("occurrence_date", detailOccurrenceDateStr);
   }
 
   document.getElementById("detailModal").classList.remove("show");
