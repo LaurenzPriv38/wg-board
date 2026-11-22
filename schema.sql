@@ -57,12 +57,37 @@ create table if not exists task_assignments (
   primary key (task_id, week_start)
 );
 
+-- Teams: Gruppierung von Mitgliedern mit eigenem Soll-Anteil pro Team.
+-- Eine Person kann in mehreren Teams sein, mit unterschiedlichem Soll-Anteil.
+create table if not exists teams (
+  id uuid primary key default gen_random_uuid(),
+  wg_id uuid references wgs(id) on delete cascade not null,
+  name text not null,
+  created_at timestamptz default now()
+);
+
+-- Mitgliedschaft in einem Team inkl. team-eigenem Soll-Anteil und
+-- team-eigenem (rücksetzbarem) Punktestand.
+create table if not exists team_members (
+  team_id uuid references teams(id) on delete cascade not null,
+  member_id uuid references members(id) on delete cascade not null,
+  quota_percent numeric(5,1) not null default 0,
+  points int not null default 0,
+  primary key (team_id, member_id)
+);
+
+-- Aufgaben können jetzt optional einem oder mehreren Teams zugeordnet werden
+-- (nur relevant bei "Rotierend" - leer = rotiert über alle Mitglieder/Teams).
+alter table tasks add column if not exists team_ids uuid[] default '{}';
+
 -- Row Level Security aktivieren
 alter table wgs enable row level security;
 alter table members enable row level security;
 alter table tasks enable row level security;
 alter table completions enable row level security;
 alter table task_assignments enable row level security;
+alter table teams enable row level security;
+alter table team_members enable row level security;
 
 -- Diese App hat bewusst kein Login ("Vertrauens-App"). Jeder, der
 -- den anon-key + die WG-Code kennt, darf lesen/schreiben. Das ist für eine
@@ -72,12 +97,16 @@ create policy "public_all_members" on members for all using (true) with check (t
 create policy "public_all_tasks" on tasks for all using (true) with check (true);
 create policy "public_all_completions" on completions for all using (true) with check (true);
 create policy "public_all_task_assignments" on task_assignments for all using (true) with check (true);
+create policy "public_all_teams" on teams for all using (true) with check (true);
+create policy "public_all_team_members" on team_members for all using (true) with check (true);
 
 -- Realtime aktivieren, damit alle Geräte sofort Änderungen sehen
 alter publication supabase_realtime add table members;
 alter publication supabase_realtime add table tasks;
 alter publication supabase_realtime add table completions;
 alter publication supabase_realtime add table task_assignments;
+alter publication supabase_realtime add table teams;
+alter publication supabase_realtime add table team_members;
 
 -- ====================================================================
 -- MIGRATION für bereits bestehende Datenbanken (nur EINMAL ausführen,
@@ -105,3 +134,27 @@ alter publication supabase_realtime add table task_assignments;
 -- alter table task_assignments enable row level security;
 -- create policy "public_all_task_assignments" on task_assignments for all using (true) with check (true);
 -- alter publication supabase_realtime add table task_assignments;
+
+-- Neu: Teams-Feature (einmalig ausführen, falls "tasks"/"members" schon
+-- vorher existierten). Der Soll-Anteil lebt ab jetzt komplett auf Team-Ebene -
+-- members.quota_percent wird von der App nicht mehr benutzt, kann aber bleiben.
+-- create table if not exists teams (
+--   id uuid primary key default gen_random_uuid(),
+--   wg_id uuid references wgs(id) on delete cascade not null,
+--   name text not null,
+--   created_at timestamptz default now()
+-- );
+-- create table if not exists team_members (
+--   team_id uuid references teams(id) on delete cascade not null,
+--   member_id uuid references members(id) on delete cascade not null,
+--   quota_percent numeric(5,1) not null default 0,
+--   points int not null default 0,
+--   primary key (team_id, member_id)
+-- );
+-- alter table tasks add column if not exists team_ids uuid[] default '{}';
+-- alter table teams enable row level security;
+-- alter table team_members enable row level security;
+-- create policy "public_all_teams" on teams for all using (true) with check (true);
+-- create policy "public_all_team_members" on team_members for all using (true) with check (true);
+-- alter publication supabase_realtime add table teams;
+-- alter publication supabase_realtime add table team_members;
