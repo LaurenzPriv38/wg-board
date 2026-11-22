@@ -18,7 +18,7 @@ create table if not exists members (
   id uuid primary key default gen_random_uuid(),
   wg_id uuid references wgs(id) on delete cascade not null,
   name text not null,
-  quota_percent int not null default 100, -- Soll-Anteil am WG-Haushalt in %
+  quota_percent numeric(5,1) not null default 100, -- Soll-Anteil am WG-Haushalt in % (eine Nachkommastelle, Summe aller Mitglieder sollte zwischen 98 und 100 liegen)
   points int not null default 0,
   created_at timestamptz default now()
 );
@@ -31,7 +31,8 @@ create table if not exists tasks (
   details text default '',
   points int not null default 10,
   cycle_days int not null default 7, -- Wiederholungszyklus in Tagen
-  assigned_member_ids uuid[] default '{}', -- leer = für alle
+  assigned_member_ids uuid[] default '{}', -- leer = für alle / ganzer Rotations-Pool
+  rotation_enabled boolean not null default false, -- true = Aufgabe rotiert automatisch statt fest zugewiesen zu sein
   last_done_at timestamptz default now(),
   created_at timestamptz default now()
 );
@@ -63,3 +64,15 @@ create policy "public_all_completions" on completions for all using (true) with 
 alter publication supabase_realtime add table members;
 alter publication supabase_realtime add table tasks;
 alter publication supabase_realtime add table completions;
+
+-- ====================================================================
+-- MIGRATION für bereits bestehende Datenbanken (nur EINMAL ausführen,
+-- falls du schema.sql schon vorher komplett ausgeführt hattest):
+-- Ändert quota_percent von int auf eine Nachkommastelle, damit z. B.
+-- 33.3% bei "Gleichmäßig verteilen" gespeichert werden kann.
+-- ====================================================================
+-- alter table members alter column quota_percent type numeric(5,1);
+
+-- Neu für die Rotations-Funktion (einmalig ausführen, falls die Tabelle
+-- "tasks" schon vorher existierte):
+-- alter table tasks add column if not exists rotation_enabled boolean not null default false;
