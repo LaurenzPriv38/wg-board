@@ -17,6 +17,7 @@ let state = {
   completions: [],
   me: null,
   homeFilter: "all",
+  weekPlan: {}, // taskId -> memberId, wer diese Kalenderwoche für rotierende Aufgaben dran ist
 };
 let quotaInteracting = false; // true solange ein Soll-Anteil-Regler aktiv bedient wird
 
@@ -208,6 +209,7 @@ async function addMemberOnboard() {
 // ---------------- RENDER: HOME ----------------
 
 function renderAll() {
+  state.weekPlan = computeWeekPlan();
   renderLeaderboard();
   renderFilterRow();
   renderHomeTaskList();
@@ -290,7 +292,7 @@ function taskUrgency(task) {
   const remainingMs = dueAt - Date.now();
   const remainingDays = remainingMs / 86400000;
   const fractionRemaining = Math.max(0, Math.min(1, remainingMs / cycleMs));
-  return { remainingMs, remainingDays, fractionRemaining, cycleMs };
+  return { remainingMs, remainingDays, fractionRemaining, cycleMs, dueDate: new Date(dueAt) };
 }
 
 function urgencyColor(remainingDays, overdue) {
@@ -308,16 +310,138 @@ function urgencyLabel(u) {
   }
   const d = Math.round(u.remainingDays);
   if (d === 0) return "Heute fällig";
-  return `Noch ${d} Tag${d === 1 ? "" : "e"}`;
+  // Innerhalb der laufenden Kalenderwoche: nur der Wochentag.
+  // Weiter weg: Datum + Wochentag.
+  const weekEnd = getWeekEnd(getWeekStart(new Date()));
+  if (u.dueDate < weekEnd) {
+    return "Fällig: " + u.dueDate.toLocaleDateString("de-DE", { weekday: "long" });
+  }
+  return "Fällig: " + u.dueDate.toLocaleDateString("de-DE", { weekday: "short", day: "2-digit", month: "short" });
+}
+
+// ---------------- WOCHENPLAN / ROTATION ----------------
+
+const DAY_MS = 86400000;
+
+// Montag 00:00 der Woche, in der "date" liegt.
+function getWeekStart(date) {
+  const d = new Date(date);
+  d.setHours(0, 0, 0, 0);
+  const day = d.getDay(); // 0 = Sonntag ... 6 = Samstag
+  const diffToMonday = day === 0 ? -6 : 1 - day;
+  d.setDate(d.getDate() + diffToMonday);
+  return d;
+}
+
+function getWeekEnd(weekStart) {
+  const d = new Date(weekStart);
+  d.setDate(d.getDate() + 7);
+  return d;
+}
+
+function getMonthStart(date) {
+  const d = new Date(date);
+  return new Date(d.getFullYear(), d.getMonth(), 1, 0, 0, 0, 0);
+}
+
+function pointsEarnedInRange(memberId, start, end) {
+  return state.completions
+    .filter((c) => c.member_id === memberId && new Date(c.completed_at) >= start && new Date(c.completed_at) < end)
+    .reduce((s, c) => s + c.points, 0);
+}
+
+// Letzter Zeitpunkt, an dem "memberId" genau diese Aufgabe erledigt hat (oder -Infinity, falls nie).
+function lastCompletedTaskAt(taskId, memberId) {
+  let last = -Infinity;
+  state.completions.forEach((c) => {
+    if (c.task_id === taskId && c.member_id === memberId) {
+      const t = new Date(c.completed_at).getTime();
+      if (t > last) last = t;
+    }
+  });
+  return last;
+}
+
+// Berechnet, wer für jede rotierende Aufgabe, die in der laufenden Kalenderwoche
+// fällig wird, eingeplant ist - mit dem Ziel, dass alle über den Monat hinweg
+// möglichst nah an ihren Soll-Anteil kommen. Wird zustandslos bei jedem Rendern
+// neu berechnet (keine eigene Speicherung nötig, bleibt dadurch immer synchron).
+function computeWeekPlan() {
+  const plan = {};
+  if (state.members.length === 0) return plan;
+
+  const now = new Date();
+  const weekStart = getWeekStart(now);
+  const weekEnd = getWeekEnd(weekStart);
+  const monthStart = getMonthStart(now);
+
+  // Virtueller, hochgerechneter Punktestand je Mitglied in diesem Monat -
+  // wird während der Verteilung innerhalb der Woche laufend angepasst.
+  const virtualEarned = {};
+  state.members.forEach((m) => {
+    virtualEarned[m.id] = pointsEarnedInRange(m.id, monthStart, now);
+  });
+  let virtualTotal = Object.values(virtualEarned).reduce((a, b) => a + b, 0);
+
+  const dueThisWeek = state.tasks.filter((t) => t.rotation_enabled && taskUrgency(t).dueDate < weekEnd);
+  // Größte Punktwerte zuerst verteilen - die haben den größten Einfluss auf die Fairness.
+  dueThisWeek.sort((a, b) => b.points - a.points || taskUrgency(a).dueDate - taskUrgency(b).dueDate);
+
+  dueThisWeek.forEach((t) => {
+    const pool = t.assigned_member_ids && t.assigned_member_ids.length
+      ? t.assigned_member_ids.filter((id) => state.members.some((m) => m.id === id))
+      : state.members.map((m) => m.id);
+    if (pool.length === 0) return;
+
+    let best = null;
+    let bestDeficit = -Infinity;
+    let bestLastDone = Infinity;
+
+    pool.forEach((id) => {
+      const member = state.members.find((m) => m.id === id);
+      const idealShare = (Number(member.quota_percent) / 100) * virtualTotal;
+      const deficit = idealShare - (virtualEarned[id] || 0);
+      const lastDone = lastCompletedTaskAt(t.id, id);
+      const better =
+        deficit > bestDeficit + 0.001 ||
+        (Math.abs(deficit - bestDeficit) <= 0.001 && lastDone < bestLastDone);
+      if (better) {
+        best = id;
+        bestDeficit = deficit;
+        bestLastDone = lastDone;
+      }
+    });
+
+    if (best) {
+      plan[t.id] = best;
+      virtualEarned[best] = (virtualEarned[best] || 0) + t.points;
+      virtualTotal += t.points;
+    }
+  });
+
+  return plan;
+}
+
+// Anzeige-Text für die Zuständigkeit einer Aufgabe (Karte + Detailansicht).
+function assigneeLine(task) {
+  if (task.rotation_enabled) {
+    const assignedId = state.weekPlan[task.id];
+    if (assignedId) return "🔁 Diese Woche: " + memberName(assignedId);
+    const poolNames = task.assigned_member_ids && task.assigned_member_ids.length
+      ? task.assigned_member_ids.map((id) => memberName(id)).join(", ")
+      : "alle";
+    return "🔁 Rotierend (" + poolNames + ")";
+  }
+  const assignedNames = task.assigned_member_ids && task.assigned_member_ids.length
+    ? task.assigned_member_ids.map((id) => memberName(id)).join(", ")
+    : "Alle";
+  return "👥 " + assignedNames;
 }
 
 function buildTaskCard(task) {
   const u = taskUrgency(task);
   const overdue = u.remainingMs < 0;
   const widthPct = Math.round(u.fractionRemaining * 100);
-  const assignedNames = task.assigned_member_ids && task.assigned_member_ids.length
-    ? task.assigned_member_ids.map((id) => memberName(id)).join(", ")
-    : "Alle";
 
   const card = document.createElement("div");
   card.className = "task-card";
@@ -326,7 +450,7 @@ function buildTaskCard(task) {
       <div class="task-title">${escapeHtml(task.title)}</div>
       <div class="task-points">${task.points} P.</div>
     </div>
-    <div class="task-assignees">👥 ${escapeHtml(assignedNames)}</div>
+    <div class="task-assignees">${escapeHtml(assigneeLine(task))}</div>
     <div class="urgency-track"><div class="urgency-fill" style="width:${overdue ? 100 : widthPct}%; background:${urgencyColor(u.remainingDays, overdue)}"></div></div>
     <div class="urgency-label" style="color:${urgencyColor(u.remainingDays, overdue)}">${urgencyLabel(u)}</div>
   `;
@@ -343,9 +467,14 @@ function renderHomeTaskList() {
   el.innerHTML = "";
   let tasks = state.tasks;
   if (state.homeFilter !== "all") {
-    tasks = tasks.filter(
-      (t) => !t.assigned_member_ids || t.assigned_member_ids.length === 0 || t.assigned_member_ids.includes(state.homeFilter)
-    );
+    tasks = tasks.filter((t) => {
+      if (t.rotation_enabled) {
+        // Rotierende Aufgaben tauchen in der persönlichen Ansicht nur auf,
+        // wenn man diese Woche tatsächlich dafür eingeplant ist.
+        return state.weekPlan[t.id] === state.homeFilter;
+      }
+      return !t.assigned_member_ids || t.assigned_member_ids.length === 0 || t.assigned_member_ids.includes(state.homeFilter);
+    });
   }
   tasks = sortByUrgency(tasks);
   if (tasks.length === 0) {
@@ -431,6 +560,7 @@ document.getElementById("btnSwitchProfile").onclick = () => {
 
 let editingTaskId = null;
 let selectedAssignees = new Set();
+let assignMode = "fixed"; // "fixed" | "rotating"
 
 document.getElementById("cycleDaysSlider").oninput = (e) => {
   document.getElementById("cycleDaysLabel").textContent = e.target.value + " Tage";
@@ -454,9 +584,29 @@ function openTaskModal(task) {
   selectedAssignees = new Set(task && task.assigned_member_ids ? task.assigned_member_ids : []);
   renderAssigneeChips();
 
+  assignMode = task && task.rotation_enabled ? "rotating" : "fixed";
+  updateAssignModeUI();
+
   document.getElementById("btnDeleteTask").classList.toggle("hidden", !task);
   document.getElementById("taskModal").classList.add("show");
 }
+
+function updateAssignModeUI() {
+  document.querySelectorAll(".mode-btn").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.mode === assignMode);
+  });
+  document.getElementById("assigneeHint").textContent =
+    assignMode === "rotating"
+      ? "Legt fest, wer für die Rotation infrage kommt. Niemand ausgewählt = alle WG-Mitglieder rotieren."
+      : "Niemand ausgewählt = Aufgabe gilt für alle.";
+}
+
+document.querySelectorAll(".mode-btn").forEach((btn) => {
+  btn.onclick = () => {
+    assignMode = btn.dataset.mode;
+    updateAssignModeUI();
+  };
+});
 
 function renderAssigneeChips() {
   const wrap = document.getElementById("assigneeChips");
@@ -491,6 +641,7 @@ document.getElementById("btnSaveTask").onclick = async () => {
     cycle_days: parseInt(document.getElementById("cycleDaysSlider").value, 10),
     points: parseInt(document.getElementById("pointsSlider").value, 10),
     assigned_member_ids: Array.from(selectedAssignees),
+    rotation_enabled: assignMode === "rotating",
   };
 
   if (editingTaskId) {
@@ -537,11 +688,8 @@ function openDetailModal(task) {
   statusEl.textContent = urgencyLabel(u);
   statusEl.style.color = urgencyColor(u.remainingDays, overdue);
 
-  const assignedNames = task.assigned_member_ids && task.assigned_member_ids.length
-    ? task.assigned_member_ids.map((id) => memberName(id)).join(", ")
-    : "Alle";
   document.getElementById("detailMeta").textContent =
-    `Zuständig: ${assignedNames} · Wert: ${task.points} Punkte · Zyklus: alle ${task.cycle_days} Tage`;
+    `Zuständig: ${assigneeLine(task)} · Wert: ${task.points} Punkte · Zyklus: alle ${task.cycle_days} Tage`;
 
   const doneBySelect = document.getElementById("detailDoneBySelect");
   doneBySelect.innerHTML = "";
@@ -735,7 +883,7 @@ document.getElementById("btnLeaveWg").onclick = () => {
   localStorage.removeItem(LS.wgCode);
   localStorage.removeItem(LS.wgName);
   localStorage.removeItem(LS.memberId);
-  state = { wg: null, members: [], tasks: [], me: null, homeFilter: "all" };
+  state = { wg: null, members: [], tasks: [], completions: [], me: null, homeFilter: "all", weekPlan: {} };
   document.getElementById("newWgName").value = "";
   document.getElementById("joinCode").value = "";
   showScreen("onboarding");
